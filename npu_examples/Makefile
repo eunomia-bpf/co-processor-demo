@@ -1,7 +1,7 @@
 CXX = g++
 CXXFLAGS = -Wall -O3 -std=c++17
 OPENVINO_CFLAGS = $(shell pkg-config --cflags openvino 2>/dev/null || echo "-DOPENVINO_NOT_FOUND")
-OPENVINO_LIBS = $(shell pkg-config --libs openvino 2>/dev/null || echo "")
+OPENVINO_LIBS = -lopenvino -ltbb
 
 all: npu_matrix_mul
 

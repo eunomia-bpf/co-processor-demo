@@ -3,10 +3,9 @@
 #include <chrono>
 #include <random>
 #include <algorithm>
-
-#ifdef HAVE_OPENVINO
 #include <openvino/openvino.hpp>
-#endif
+#include <openvino/op/matmul.hpp>
+
 
 #define MATRIX_SIZE 1024
 
@@ -24,7 +23,6 @@ void matrix_multiply_cpu(const std::vector<float>& a, const std::vector<float>& 
     }
 }
 
-#ifdef HAVE_OPENVINO
 // Function to create and run a simple matrix multiplication model on the NPU
 void matrix_multiply_npu(const std::vector<float>& a, const std::vector<float>& b, 
                         std::vector<float>& c, int size) {
@@ -39,8 +37,8 @@ void matrix_multiply_npu(const std::vector<float>& a, const std::vector<float>& 
         }
 
         // Create a model with matrix multiplication operation
-        ov::Shape input_shape{size, size};
-        ov::Shape output_shape{size, size};
+        ov::Shape input_shape{static_cast<size_t>(size), static_cast<size_t>(size)};
+        ov::Shape output_shape{static_cast<size_t>(size), static_cast<size_t>(size)};
 
         // Create model inputs
         auto input_a = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, input_shape);
@@ -49,9 +47,10 @@ void matrix_multiply_npu(const std::vector<float>& a, const std::vector<float>& 
         // Create matrix multiplication operation
         auto matmul = std::make_shared<ov::op::v0::MatMul>(input_a, input_b, false, false);
         
-        // Create model
-        auto model = std::make_shared<ov::Model>(ov::OutputVector{matmul}, 
-                                                ov::ParameterVector{input_a, input_b});
+        // Create model with proper OutputVector initialization
+        auto outputs = ov::OutputVector{matmul};
+        auto params = ov::ParameterVector{input_a, input_b};
+        auto model = std::make_shared<ov::Model>(outputs, params);
         
         // Try to compile for NPU, fallback to other devices if not available
         ov::CompiledModel compiled_model;
@@ -104,7 +103,6 @@ void matrix_multiply_npu(const std::vector<float>& a, const std::vector<float>& 
         throw;
     }
 }
-#endif
 
 int main() {
     // Initialize matrices
@@ -131,7 +129,6 @@ int main() {
     
     std::cout << "CPU execution time: " << cpu_duration.count() << " ms" << std::endl;
 
-#ifdef HAVE_OPENVINO
     try {
         // NPU execution timing
         auto npu_start = std::chrono::high_resolution_clock::now();
@@ -159,15 +156,7 @@ int main() {
     } catch (const std::exception& e) {
         std::cerr << "Error during NPU execution: " << e.what() << std::endl;
     }
-#else
-    std::cout << "\nNOTE: This demo was compiled without OpenVINO support." << std::endl;
-    std::cout << "To use the NPU with OpenVINO, please:" << std::endl;
-    std::cout << "1. Install OpenVINO development package" << std::endl;
-    std::cout << "2. Recompile with -DHAVE_OPENVINO flag and link against OpenVINO libraries" << std::endl;
-    std::cout << "Example:" << std::endl;
-    std::cout << "  g++ -DHAVE_OPENVINO -o npu_openvino_demo npu_openvino_demo.cpp \\" << std::endl;
-    std::cout << "      $(pkg-config --cflags --libs openvino)" << std::endl;
-#endif
+
 
     return 0;
 } 

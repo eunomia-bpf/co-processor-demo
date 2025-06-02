@@ -33,3 +33,4 @@
 
 vector_add
 gpu_examples/matrix_mul
+npu_examples/npu_matrix_mul
