@@ -32,3 +32,4 @@
 *.app
 
 vector_add
+gpu_examples/matrix_mul
