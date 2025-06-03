@@ -14,3 +14,4 @@ generated_kernel.cl
 *.log
 *~
 .DS_Store 
+vector_add.ll.tmp
