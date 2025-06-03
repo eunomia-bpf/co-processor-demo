@@ -1,0 +1,16 @@
+# Compiled binaries
+llvm_to_opencl
+
+# Intermediate files
+*.o
+*.bc
+*.spv
+*.s
+build/
+vector_add_generated.cl
+generated_kernel.cl
+
+# Logs and temp files
+*.log
+*~
+.DS_Store 

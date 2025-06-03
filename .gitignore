@@ -34,3 +34,8 @@
 vector_add
 gpu_examples/matrix_mul
 npu_examples/npu_matrix_mul
+gpu_examples/llvm_to_opencl/llvm_to_opencl
+linux-npu-driver
+venv
+test_devices
+npu_examples/list_devices
