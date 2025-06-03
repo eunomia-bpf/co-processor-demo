@@ -39,3 +39,4 @@ linux-npu-driver
 venv
 test_devices
 npu_examples/list_devices
+gpu_examples/llvm_to_opencl/simple_opencl_runner

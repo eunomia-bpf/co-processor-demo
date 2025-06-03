@@ -1,0 +1,20 @@
+CC = gcc
+CFLAGS = -Wall -Werror
+LDFLAGS = -lOpenCL -lm
+
+all: simple_opencl_runner
+
+simple_opencl_runner: simple_opencl_runner.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+spir-v: simple_vector_add.ll
+	chmod +x simple_converter.sh
+	./simple_converter.sh $< simple_vector_add.spv
+
+run: all spir-v
+	./simple_opencl_runner simple_vector_add.spv
+
+clean:
+	rm -f simple_opencl_runner *.spv *.bc
+
+.PHONY: all spir-v run clean 
