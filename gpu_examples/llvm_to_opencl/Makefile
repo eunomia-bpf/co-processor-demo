@@ -21,20 +21,18 @@ setup:
 	fi
 	@mkdir -p $(SPIRV_LLVM_TOOLS_DIR)
 
-# Convert LLVM IR to SPIR-V
+# Convert LLVM IR to SPIR-V (for reference only, now done using script)
 vector_add.spv: vector_add.ll
 	@echo "Converting LLVM IR to SPIR-V..."
-	llvm-as-$(LLVM_VERSION) vector_add.ll -o $(SPIRV_LLVM_TOOLS_DIR)/vector_add.bc
-	llvm-spirv $(SPIRV_LLVM_TOOLS_DIR)/vector_add.bc -o vector_add.spv
+	./convert_ir.sh -s -o vector_add.spv vector_add.ll
 
-# Alternative: Generate OpenCL C code from LLVM IR via Clang
+# Generate OpenCL C code from LLVM IR (for reference only, now done using script)
 vector_add_generated.cl: vector_add.ll
 	@echo "Generating OpenCL C code from LLVM IR..."
-	clang-$(LLVM_VERSION) -S -emit-llvm vector_add.ll -o $(SPIRV_LLVM_TOOLS_DIR)/vector_add.ll
-	clang-$(LLVM_VERSION) -x cl -Xclang -finclude-default-header -S -emit-llvm $(SPIRV_LLVM_TOOLS_DIR)/vector_add.ll -o $(SPIRV_LLVM_TOOLS_DIR)/vector_add_cl.ll
-	llvm-dis-$(LLVM_VERSION) $(SPIRV_LLVM_TOOLS_DIR)/vector_add_cl.ll -o vector_add_generated.cl
+	./convert_ir.sh -c -o vector_add_generated.cl vector_add.ll
 
-llvm_to_opencl: llvm_to_opencl.c vector_add.spv
+# Build the main application
+llvm_to_opencl: llvm_to_opencl.c
 	$(CC) $(CFLAGS) -o llvm_to_opencl llvm_to_opencl.c $(LDFLAGS)
 
 clean:
