@@ -74,3 +74,45 @@ Based on the VTune profiling data and the kernel trace, I can map the Level Zero
 
   The total execution time of ~15 seconds with most time spent in IPC communication suggests the NPU was actively
   processing the matrix multiplication workload during this period.
+
+
+vtune: Warning: Cannot locate debugging information for file `/opt/intel/oneapi/vtune/2025.4/lib64/libtpsstool.so'.
+vtune: Warning: Cannot locate debugging information for file `/lib/x86_64-linux-gnu/libnpu_driver_compiler.so'.
+vtune: Executing actions 75 % Generating a report                              Elapsed Time: 14.814s
+
+        Top Hotspots when GPU was idle
+        Function                                                                                         Module        
+        -----------------------------------------------------------------------------------------------  --------------
+        operator new                                                                                     libc++abi.so  
+        __cxa_demangle                                                                                   libc++abi.so  
+        std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>::operator=  libc++.so     
+        std::__1::basic_string<char, std::__1::char_traits<char>, std::__1::allocator<char>>::append     libc++.so     
+        matrix_multiply_cpu                                                                              npu_matrix_mul
+        [Others]                                                                                         N/A           
+
+Hottest Host Tasks
+Host Task                          Task Time  % of Elapsed Time(%)  Task Count
+---------------------------------  ---------  --------------------  ----------
+zeCommandQueueExecuteCommandLists     0.005s                  0.0%           1
+zeMemAllocHost                        0.004s                  0.0%           3
+zeFenceHostSynchronize                0.002s                  0.0%           1
+zeCommandQueueCreate                  0.000s                  0.0%           1
+zeCommandListCreate                   0.000s                  0.0%           1
+Collection and Platform Info
+    Application Command Line: ./npu_matrix_mul "npu_analysis_vtune.txt" 
+    Operating System: 6.13.0-rc4+ DISTRIB_ID=Ubuntu DISTRIB_RELEASE=25.04 DISTRIB_CODENAME=plucky DISTRIB_DESCRIPTION="Ubuntu Plucky Puffin (development branch)"
+    Computer Name: victoryang00-ASUS-Zenbook-S-14-UX5406SA-UX5406SA
+    Result Size: 5.0 MB 
+    Collection start time: 03:53:04 05/08/2025 UTC
+    Collection stop time: 03:53:19 05/08/2025 UTC
+    Collector Type: User-mode sampling and tracing
+    CPU
+        Name: Intel(R) microarchitecture code named Lunarlake-M
+        Frequency: 3.302 GHz
+        Logical CPU Count: 8
+
+If you want to skip descriptions of detected performance issues in the report,
+enter: vtune -report summary -report-knob show-issues=false -r <my_result_dir>.
+Alternatively, you may view the report in the csv format: vtune -report
+<report_name> -format=csv.
+vtune: Executing actions 100 % done                   
