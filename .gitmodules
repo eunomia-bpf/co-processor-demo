@@ -1,0 +1,3 @@
+[submodule "gpu_scheduler/cutlass"]
+	path = gpu_scheduler/cutlass
+	url = https://github.com/NVIDIA/cutlass.git
