@@ -1,0 +1,64 @@
+# Binaries - Working examples
+test_vec_add
+minimal_clc_12.9_api
+minimal_clc_12.9
+
+# Binaries - Failed attempts (non-runnable)
+simple_clc
+minimal_clc_ptx
+minimal_clc_ptx_v2
+clc_v2
+minimal_clc_13
+cubin_loader
+cubin_loader_simple
+
+# Legacy binaries
+fixed_work
+fixed_blocks
+vector_add
+matrix_add
+clc
+clc_cluster
+clc_working
+
+# Temp files
+*.ptx
+*.cubin
+*.fatbin
+*.o
+*.so
+*.a
+/tmp/*.ptx
+/tmp/*.cubin
+
+# CUDA compilation artifacts
+*.i
+*.ii
+*.gpu
+*.cu.cpp
+*.cudafe*
+*.module_id
+*.stub.c
+*.fatbin.c
+*.hash
+
+# Core dumps
+core
+core.*
+*.core
+
+# Editor/IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build directories
+build/
+bin/
+obj/
+
+# Logs
+*.log
