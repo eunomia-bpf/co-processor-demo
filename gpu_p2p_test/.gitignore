@@ -1,0 +1,45 @@
+# Object files
+*.o
+*.out
+*.exe
+
+# Compiled binaries
+check_p2p_gds
+gpu_file_benchmark
+
+# Test data files
+*.dat
+/tmp/
+
+# Build artifacts
+*.a
+*.so
+*.dylib
+
+# CUDA compilation files
+*.ptx
+*.cubin
+*.fatbin
+
+# Dependencies
+*.d
+
+# Logs
+*.log
+cufile.log
+
+# Temporary files
+*.tmp
+*~
+.*.swp
+.*.swo
+
+# IDE files
+.vscode/
+.idea/
+*.suo
+*.user
+
+# OS files
+.DS_Store
+Thumbs.db
