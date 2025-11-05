@@ -20,18 +20,23 @@ NVCC_FLAGS = -arch=$(ARCH) --no-device-link -O3
 .PHONY: all clean test help
 
 # Default target
-all: clc_benchmark_workloads
+all: clc_benchmark_workloads clc_policy_benchmark
 
 # AI workload analysis benchmark - real-world scenarios
 clc_benchmark_workloads: clc_benchmark_workloads.cu
 	$(NVCC) $(NVCC_FLAGS) -o clc_benchmark_workloads clc_benchmark_workloads.cu
 	@echo "✅ Built: clc_benchmark_workloads"
 
+# Policy-based scheduler benchmark
+clc_policy_benchmark: clc_policy_benchmark.cu clc_scheduler_policy.cuh
+	$(NVCC) $(NVCC_FLAGS) -o clc_policy_benchmark clc_policy_benchmark.cu
+	@echo "✅ Built: clc_policy_benchmark"
+
 # ============================================
 # TEST TARGETS
 # ============================================
 
-test: clc_benchmark_workloads
+test: clc_benchmark_workloads clc_policy_benchmark
 	@echo "=== Testing CLC AI Workload Benchmark ==="
 	@echo ""
 	./clc_benchmark_workloads
@@ -50,6 +55,11 @@ run-small: clc_benchmark_workloads
 run-large: clc_benchmark_workloads
 	@echo "=== Running CLC AI Workload Benchmark (4M elements) ==="
 	./clc_benchmark_workloads 4194304 256
+
+# Run policy benchmark
+run-policy: clc_policy_benchmark
+	@echo "=== Running CLC Policy Benchmark (1M elements) ==="
+	./clc_policy_benchmark
 
 # ============================================
 # INFORMATION
@@ -71,7 +81,7 @@ info:
 # ============================================
 
 clean:
-	rm -f clc_benchmark_workloads
+	rm -f clc_benchmark_workloads clc_policy_benchmark
 	rm -f /tmp/clc*.ptx /tmp/clc*.cubin
 	@echo "Cleaned all binaries and temp files"
 
@@ -83,15 +93,17 @@ help:
 	@echo "CLC AI Workload Benchmark - Makefile"
 	@echo ""
 	@echo "BUILD TARGETS:"
-	@echo "  make                         - Build benchmark (default)"
-	@echo "  make all                     - Build benchmark"
+	@echo "  make                         - Build all benchmarks"
+	@echo "  make all                     - Build all benchmarks"
 	@echo "  make clc_benchmark_workloads - Build AI workload benchmark"
+	@echo "  make clc_policy_benchmark    - Build the policy scheduler benchmark"
 	@echo ""
 	@echo "TEST TARGETS:"
-	@echo "  make test          - Build and run benchmark (1M elements)"
-	@echo "  make run           - Run benchmark (1M elements, default)"
-	@echo "  make run-small     - Run benchmark (256K elements, quick)"
-	@echo "  make run-large     - Run benchmark (4M elements)"
+	@echo "  make test          - Build and run the original benchmark"
+	@echo "  make run           - Run the original benchmark"
+	@echo "  make run-small     - Run the original benchmark (256K elements)"
+	@echo "  make run-large     - Run the original benchmark (4M elements)"
+	@echo "  make run-policy    - Run the new policy benchmark"
 	@echo ""
 	@echo "BENCHMARK USAGE:"
 	@echo "  ./clc_benchmark_workloads [n] [threads]"

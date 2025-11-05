@@ -1,5 +1,6 @@
 # Binaries
 clc_benchmark_workloads
+clc_policy_benchmark
 # Temp files
 *.ptx
 *.cubin
