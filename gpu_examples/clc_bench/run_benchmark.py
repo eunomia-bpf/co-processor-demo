@@ -82,69 +82,53 @@ print(f"\nSaved visualization to clc_benchmark_results.png")
 df['Speedup_vs_FixedWork'] = ((df['FixedWork_ms'] - df['CLC_ms']) / df['FixedWork_ms'] * 100)
 df['Speedup_vs_FixedBlocks'] = ((df['FixedBlocks_ms'] - df['CLC_ms']) / df['FixedBlocks_ms'] * 100)
 
-# Print detailed results for each test
-print("\n" + "="*95)
-print("  CLC BENCHMARK RESULTS - DETAILED SPEEDUP REPORT")
-print("="*95)
+# Print detailed results in Markdown format
+print("\n# CLC Benchmark Results - Detailed Speedup Report\n")
 
 for size in size_order:
     size_data = df[df['Size'] == size]
     if len(size_data) == 0:
         continue
 
-    print(f"\n{'─'*95}")
-    print(f"  SIZE: {size} elements")
-    print(f"{'─'*95}")
-    print("┌──────────────────────────────┬────────────┬────────────┬────────────┬────────────┬────────────┐")
-    print("│ Workload                     │ FixedWork  │ FixedBlock │    CLC     │ vs FixWork │ vs FixBlk  │")
-    print("│                              │    (ms)    │    (ms)    │    (ms)    │  Speedup   │  Speedup   │")
-    print("├──────────────────────────────┼────────────┼────────────┼────────────┼────────────┼────────────┤")
+    print(f"\n## Size: {size} elements\n")
+    print("| Workload | FixedWork (ms) | FixedBlock (ms) | CLC (ms) | vs FixWork | vs FixBlk |")
+    print("|----------|----------------|-----------------|----------|------------|-----------|")
 
     for _, row in size_data.iterrows():
         speedup_fw = row['Speedup_vs_FixedWork']
         speedup_fb = row['Speedup_vs_FixedBlocks']
 
         # Format speedup with + or - sign
-        speedup_fw_str = f"{speedup_fw:+7.2f}%" if speedup_fw != 0 else "  0.00%"
-        speedup_fb_str = f"{speedup_fb:+7.2f}%" if speedup_fb != 0 else "  0.00%"
+        speedup_fw_str = f"{speedup_fw:+.2f}%"
+        speedup_fb_str = f"{speedup_fb:+.2f}%"
 
-        print(f"│ {row['Scenario']:28s} │ {row['FixedWork_ms']:10.3f} │ {row['FixedBlocks_ms']:10.3f} │ "
-              f"{row['CLC_ms']:10.3f} │ {speedup_fw_str:10s} │ {speedup_fb_str:10s} │")
-
-    print("└──────────────────────────────┴────────────┴────────────┴────────────┴────────────┴────────────┘")
+        print(f"| {row['Scenario']} | {row['FixedWork_ms']:.3f} | {row['FixedBlocks_ms']:.3f} | "
+              f"{row['CLC_ms']:.3f} | {speedup_fw_str} | {speedup_fb_str} |")
 
 # Print summary
-print("\n" + "="*95)
-print("  SUMMARY")
-print("="*95)
+print("\n---\n")
+print("## Summary\n")
 
-print("\n┌─────────────────────────────────────────────────────────────────────────────────────────────┐")
-print("│ OVERALL AVERAGE SPEEDUP                                                                    │")
-print("├─────────────────────────────────────────────────────────────────────────────────────────────┤")
 avg_speedup_fw = df['Speedup_vs_FixedWork'].mean()
 avg_speedup_fb = df['Speedup_vs_FixedBlocks'].mean()
-print(f"│  CLC vs Fixed Work:      {avg_speedup_fw:+7.2f}%                                                       │")
-print(f"│  CLC vs Fixed Blocks:    {avg_speedup_fb:+7.2f}%                                                       │")
-print("└─────────────────────────────────────────────────────────────────────────────────────────────┘")
 
-print("\n┌─────────────────────────────────────────────────────────────────────────────────────────────┐")
-print("│ BEST CONFIGURATIONS                                                                         │")
-print("├────┬──────────────────────────────┬──────────┬────────────┬────────────┬────────────────────┤")
-print("│ #  │ Workload                     │   Size   │ vs FixWork │ vs FixBlk  │  CLC Time (ms)     │")
-print("├────┼──────────────────────────────┼──────────┼────────────┼────────────┼────────────────────┤")
+print("### Overall Average Speedup\n")
+print(f"- **CLC vs Fixed Work**: {avg_speedup_fw:+.2f}%")
+print(f"- **CLC vs Fixed Blocks**: {avg_speedup_fb:+.2f}%\n")
+
+print("### Best Configurations\n")
+print("| # | Workload | Size | vs FixWork | vs FixBlk | CLC Time (ms) |")
+print("|---|----------|------|------------|-----------|---------------|")
 
 top5 = df.nlargest(5, 'Speedup_vs_FixedBlocks')
 for i, (idx, row) in enumerate(top5.iterrows(), 1):
-    print(f"│ {i}  │ {row['Scenario']:28s} │ {row['Size']:8s} │ {row['Speedup_vs_FixedWork']:+7.2f}%  │ "
-          f"{row['Speedup_vs_FixedBlocks']:+7.2f}%  │ {row['CLC_ms']:10.3f}        │")
-
-print("└────┴──────────────────────────────┴──────────┴────────────┴────────────┴────────────────────┘")
+    print(f"| {i} | {row['Scenario']} | {row['Size']} | {row['Speedup_vs_FixedWork']:+.2f}% | "
+          f"{row['Speedup_vs_FixedBlocks']:+.2f}% | {row['CLC_ms']:.3f} |")
 
 wins_fw = (df['Speedup_vs_FixedWork'] > 0).sum()
 wins_fb = (df['Speedup_vs_FixedBlocks'] > 0).sum()
 total = len(df)
 
-print(f"\n  Win Rate: {wins_fw}/{total} vs Fixed Work ({wins_fw/total*100:.1f}%),  "
-      f"{wins_fb}/{total} vs Fixed Blocks ({wins_fb/total*100:.1f}%)")
-
-print("\n" + "="*95)
+print(f"\n### Win Rate\n")
+print(f"- **vs Fixed Work**: {wins_fw}/{total} ({wins_fw/total*100:.1f}%)")
+print(f"- **vs Fixed Blocks**: {wins_fb}/{total} ({wins_fb/total*100:.1f}%)\n")
