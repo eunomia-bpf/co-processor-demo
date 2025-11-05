@@ -20,17 +20,12 @@ NVCC_FLAGS = -arch=$(ARCH) --no-device-link -O3
 .PHONY: all clean test help
 
 # Default target
-all: clc_policy_benchmark clc_policy_comparison
+all: clc_policy_benchmark
 
-# Policy-based scheduler benchmark
+# Unified policy benchmark (comprehensive + specialized modes)
 clc_policy_benchmark: clc_policy_benchmark.cu clc_policy_framework.cuh clc_policies.cuh benchmark_kernels.cuh
 	$(NVCC) $(NVCC_FLAGS) -o clc_policy_benchmark clc_policy_benchmark.cu
 	@echo "Built: clc_policy_benchmark"
-
-# Policy comparison benchmark (specialized policies)
-clc_policy_comparison: clc_policy_comparison.cu clc_policy_framework.cuh clc_policies.cuh benchmark_kernels.cuh
-	$(NVCC) $(NVCC_FLAGS) -o clc_policy_comparison clc_policy_comparison.cu
-	@echo "Built: clc_policy_comparison"
 
 # ============================================
 # TEST TARGETS
@@ -77,7 +72,7 @@ info:
 # ============================================
 
 clean:
-	rm -f clc_policy_benchmark clc_policy_comparison
+	rm -f clc_policy_benchmark
 	rm -f /tmp/clc*.ptx /tmp/clc*.cubin
 	@echo "Cleaned all binaries and temp files"
 
