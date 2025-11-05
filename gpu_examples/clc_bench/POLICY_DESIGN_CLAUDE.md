@@ -12,21 +12,31 @@
 // Template-based policy interface - zero runtime overhead, compile-time dispatch
 template<typename Policy>
 struct SchedulerPolicy {
+    // Policy-defined state (held by framework in __shared__)
+    using State = typename Policy::State;
+
     // 1. Called once at kernel start - initialize policy state
-    __device__ static void init();
+    __device__ static void init(State& s);
 
     // 2. Called BEFORE submitting a steal request: should we try to steal?
     //    Returns: false = skip this steal attempt (safe), true = submit request
-    __device__ static bool should_try_steal();
+    //    CRITICAL: Decision must be uniform across CTA (evaluated by one thread, broadcast via __shared__)
+    __device__ static bool should_try_steal(State& s);
 
     // 3. Called AFTER successful steal: should we continue to next iteration?
     //    Returns: false = exit loop, true = continue stealing
     //    Parameters: stolen_bx = the block ID we just stole
-    __device__ static bool keep_going_after_success(int stolen_bx);
+    //    CRITICAL: Decision must be uniform across CTA
+    __device__ static bool keep_going_after_success(int stolen_bx, State& s);
 };
 ```
 
-**That's it.** Just 3 callbacks. Policies manage their own state (in shared memory, registers, or global memory) if needed.
+**That's it.** Just 3 callbacks.
+
+**Key Design Points:**
+- State is defined by the policy (`Policy::State`) but **held by the framework** in `__shared__` memory
+- All callbacks receive state by reference (no `__shared__ static` members in policy types)
+- Policy decisions MUST be **uniform across the CTA** to avoid divergence/deadlock around barriers
 
 ---
 
@@ -36,7 +46,8 @@ struct SchedulerPolicy {
    - Policy cannot violate CLC constraints (no access to raw CLC APIs)
    - Two safe control points: before submitting request, after successful steal
    - Cannot submit after failure (framework handles exit immediately)
-   - Policies manage their own state (framework doesn't impose structure)
+   - Framework holds policy state in `__shared__` (avoids `__shared__ static` UB)
+   - Framework ensures uniform control flow (evaluates policy in thread 0, broadcasts decision)
 
 ### 2. **Policy Controls Participation**
    - `should_try_steal()` decides whether to submit a steal request (can skip safely)
@@ -59,15 +70,17 @@ struct SchedulerPolicy {
 ### Pattern 1: Greedy (Always Steal)
 ```cpp
 struct GreedyPolicy {
-    __device__ static void init() {
+    struct State {};  // Empty state
+
+    __device__ static void init(State& s) {
         // No state to initialize
     }
 
-    __device__ static bool should_try_steal() {
+    __device__ static bool should_try_steal(State& s) {
         return true;  // Always submit steal request
     }
 
-    __device__ static bool keep_going_after_success(int stolen_bx) {
+    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
         return true;  // Always continue
     }
 };
@@ -76,26 +89,23 @@ struct GreedyPolicy {
 ### Pattern 2: Max Steals (Stop After N Successes)
 ```cpp
 struct MaxStealsPolicy {
-    __shared__ static int steals_done;  // Track successes in shared memory
-    static constexpr int max_steals = 8;
+    struct State {
+        int steals_done = 0;
+        int max_steals = 8;  // Configurable limit
+    };
 
-    __device__ static void init() {
-        if (threadIdx.x == 0) {
-            steals_done = 0;
-        }
-        __syncthreads();
+    __device__ static void init(State& s) {
+        // s.max_steals can be set by host/constructor if needed
+        s.steals_done = 0;
     }
 
-    __device__ static bool should_try_steal() {
-        return steals_done < max_steals;
+    __device__ static bool should_try_steal(State& s) {
+        return s.steals_done < s.max_steals;
     }
 
-    __device__ static bool keep_going_after_success(int stolen_bx) {
-        if (threadIdx.x == 0) {
-            atomicAdd(&steals_done, 1);
-        }
-        __syncthreads();
-        return steals_done < max_steals;
+    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
+        s.steals_done++;  // Thread 0 updates; framework ensures uniform control
+        return s.steals_done < s.max_steals;
     }
 };
 ```
@@ -103,24 +113,22 @@ struct MaxStealsPolicy {
 ### Pattern 3: Iteration-Based Throttling
 ```cpp
 struct EveryNthIterationPolicy {
-    __shared__ static int iteration;
-    static constexpr int N = 2;  // Only steal every 2nd iteration
+    struct State {
+        int iteration = 0;
+        int N = 2;  // Only steal every Nth iteration
+    };
 
-    __device__ static void init() {
-        if (threadIdx.x == 0) {
-            iteration = 0;
-        }
-        __syncthreads();
+    __device__ static void init(State& s) {
+        s.iteration = 0;
     }
 
-    __device__ static bool should_try_steal() {
-        bool result = (iteration % N) == 0;
-        if (threadIdx.x == 0) iteration++;
-        __syncthreads();
+    __device__ static bool should_try_steal(State& s) {
+        bool result = (s.iteration % s.N) == 0;
+        s.iteration++;
         return result;
     }
 
-    __device__ static bool keep_going_after_success(int stolen_bx) {
+    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
         return true;  // Continue (throttling happens in should_try_steal)
     }
 };
@@ -129,17 +137,23 @@ struct EveryNthIterationPolicy {
 ### Pattern 4: Block-Based Policy (Different Behavior Per Block)
 ```cpp
 struct FirstHalfOnly {
-    __device__ static void init() {
-        // No state to initialize
+    struct State {
+        int block_id;
+        int half_blocks;
+    };
+
+    __device__ static void init(State& s) {
+        s.block_id = blockIdx.x;
+        s.half_blocks = gridDim.x / 2;
     }
 
-    __device__ static bool should_try_steal() {
+    __device__ static bool should_try_steal(State& s) {
         // Only first half of blocks steal aggressively
-        return blockIdx.x < (gridDim.x / 2);
+        return s.block_id < s.half_blocks;
     }
 
-    __device__ static bool keep_going_after_success(int stolen_bx) {
-        return blockIdx.x < (gridDim.x / 2);
+    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
+        return s.block_id < s.half_blocks;
     }
 };
 ```
@@ -149,18 +163,23 @@ struct FirstHalfOnly {
 // Combine multiple policies with AND logic
 template<typename P1, typename P2>
 struct AndPolicy {
-    __device__ static void init() {
-        P1::init();
-        P2::init();
+    struct State {
+        typename P1::State s1;
+        typename P2::State s2;
+    };
+
+    __device__ static void init(State& s) {
+        P1::init(s.s1);
+        P2::init(s.s2);
     }
 
-    __device__ static bool should_try_steal() {
-        return P1::should_try_steal() && P2::should_try_steal();
+    __device__ static bool should_try_steal(State& s) {
+        return P1::should_try_steal(s.s1) && P2::should_try_steal(s.s2);
     }
 
-    __device__ static bool keep_going_after_success(int stolen_bx) {
-        return P1::keep_going_after_success(stolen_bx) &&
-               P2::keep_going_after_success(stolen_bx);
+    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
+        return P1::keep_going_after_success(stolen_bx, s.s1) &&
+               P2::keep_going_after_success(stolen_bx, s.s2);
     }
 };
 
@@ -252,16 +271,19 @@ bool success1 = ptx::clusterlaunchcontrol_query_cancel_is_canceled(result1);
 **Rule**: Use proxy fences to make async stores visible to generic code.
 
 ```cpp
-// ✅ CORRECT: Fences around async operations
+// ✅ CORRECT: Acquire fence BEFORE request, release fence AFTER decoding
 ptx::fence_proxy_async_generic_sync_restrict(ptx::sem_acquire,
-                                              ptx::space_cluster,
-                                              ptx::scope_cluster);
-[...async work-stealing...]
+                                              ptx::space_shared,
+                                              ptx::scope_cta);
+ptx::clusterlaunchcontrol_try_cancel(&result, &bar);
+[...barrier wait...]
+bool success = ptx::clusterlaunchcontrol_query_cancel_is_canceled(result);
 ptx::fence_proxy_async_generic_sync_restrict(ptx::sem_release,
                                               ptx::space_shared,
-                                              ptx::scope_cluster);
+                                              ptx::scope_cta);
 
 // ❌ WRONG: No fences - shared memory updates may not be visible
+// ❌ WRONG: Fences in wrong order (release before request, acquire after)
 ```
 
 #### 5. Compute Capability 10.0+ Required ⚠️
@@ -278,59 +300,163 @@ if (prop.major < 10) {
 ```
 
 #### 6. Cluster-Specific Rules ⚠️
-**Rule**: Clusters require multicast version and local offset:
+**Rule**: Clusters require multicast version, cluster scopes, and local offset:
 
 ```cpp
 // ✅ CORRECT: Cluster-aware kernel
 __global__ __cluster_dims__(2, 1, 1) void kernel(...) {
-    // Use multicast version
-    ptx::clusterlaunchcontrol_try_cancel_multicast(&result, &bar);
+    auto cluster = cg::this_cluster();
 
-    // Add local cluster offset
+    // Sync cluster before first request
+    cluster.sync();
+
+    // Use multicast version with ONE cluster thread
+    if (cluster.block_rank() == 0 && threadIdx.x == 0) {
+        ptx::fence_proxy_async_generic_sync_restrict(ptx::sem_acquire,
+                                                      ptx::space_cluster,
+                                                      ptx::scope_cluster);
+        ptx::clusterlaunchcontrol_try_cancel_multicast(&result, &bar);
+    }
+
+    // Use scope_cluster for barrier ops
+    ptx::mbarrier_arrive_expect_tx(ptx::sem_relaxed, ptx::scope_cluster,
+                                    ptx::space_shared, &bar, sizeof(uint4));
+    while (!ptx::mbarrier_try_wait_parity(&bar, phase)) {}
+
+    // Add local cluster offset to decoded result
     int hardware_cta_id = ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x<int>(result);
-    int local_offset = cg::cluster_group::block_index().x;
+    int local_offset = cluster.block_index().x;
     int bx = hardware_cta_id + local_offset;
 
-    // Ensure all CTAs exist before canceling
-    cg::cluster_group::sync();
+    ptx::fence_proxy_async_generic_sync_restrict(ptx::sem_release,
+                                                  ptx::space_cluster,
+                                                  ptx::scope_cluster);
 }
 
 // ❌ WRONG: Regular version in cluster kernel
 __global__ __cluster_dims__(2, 1, 1) void kernel(...) {
     ptx::clusterlaunchcontrol_try_cancel(&result, &bar);  // Should use _multicast!
+    // Missing: cluster sync, scope_cluster, local offset
 }
 ```
 
-### Why Policy `should_continue()` Must Be Placed Before CLC Operations
+### Why Policy Decisions Must Be Uniform and Placed Before CLC Operations
 
-Given constraint #3 (no request after failure), the **only safe placement** for policy exit is:
+Given constraint #3 (no request after failure) and barrier synchronization requirements, the **only safe placement** for policy decisions is:
 
 ```cpp
 while (true) {
     __syncthreads();
 
-    // ✅ SAFE: Check policy BEFORE submitting request
-    if (!Policy::should_continue(blockIdx.x, iteration, policy_state)) {
-        break;  // Exit cleanly without violating CLC constraints
+    // ✅ SAFE: Uniform decision BEFORE submitting request
+    // Thread 0 evaluates, all threads read the same decision
+    if (threadIdx.x == 0) {
+        go = Policy::should_try_steal(pol_state) ? 1 : 0;
+    }
+    __syncthreads();
+
+    if (!go) {
+        break;  // All threads exit uniformly
     }
 
-    // Submit CLC request
-    ptx::clusterlaunchcontrol_try_cancel(&result, &bar);
-    [...barrier sync...]
-    bool success = ptx::clusterlaunchcontrol_query_cancel_is_canceled(result);
+    // Submit CLC request (all threads participate in barrier)
+    if (threadIdx.x == 0) {
+        ptx::clusterlaunchcontrol_try_cancel(&result, &bar);
+        ptx::mbarrier_arrive_expect_tx(...);
+    }
 
+    // ALL threads must wait (uniform control flow)
+    while (!ptx::mbarrier_try_wait_parity(&bar, phase)) {}
+
+    bool success = ptx::clusterlaunchcontrol_query_cancel_is_canceled(result);
     if (!success) {
         // ❌ UNSAFE: Cannot put policy check here and continue loop
         //    because we observed failure - must exit immediately
         break;
     }
 
-    // Process work...
-    iteration++;
+    // Uniform decision after success
+    if (threadIdx.x == 0) {
+        int bx = ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x(result);
+        go = Policy::keep_going_after_success(bx, pol_state) ? 1 : 0;
+    }
+    __syncthreads();
+
+    if (!go) break;
 }
 ```
 
-**This is why the policy framework exists**: To provide a safe, high-level interface that respects all CLC hardware constraints while enabling flexible scheduling policies.
+**Critical requirements:**
+1. **Uniform control flow**: All threads must take same path around barriers/waits
+2. **Thread 0 decides**: Policy callbacks called by thread 0, result broadcast via `__shared__`
+3. **Placement**: Decisions only at safe points (before request, after success)
+
+**This is why the policy framework exists**: To provide a safe, high-level interface that respects all CLC hardware constraints (uniform control flow, proper barrier synchronization) while enabling flexible scheduling policies.
+
+---
+
+## Critical: Uniform Control Flow Requirement
+
+**The #1 footgun**: Thread divergence around barriers causes **deadlock**.
+
+### The Problem
+CLC uses `mbarrier_try_wait_parity()` which requires **ALL threads** in the CTA to participate. If threads disagree on whether to enter the wait loop, you deadlock:
+
+```cpp
+// ❌ DEADLOCK: Threads diverge based on thread ID
+if (threadIdx.x < 16) {
+    // These 16 threads call should_try_steal() and might get true
+    if (Policy::should_try_steal(state)) {
+        // They enter the barrier wait...
+        while (!ptx::mbarrier_try_wait_parity(&bar, phase)) {}
+    }
+} else {
+    // These threads skip the wait → DEADLOCK
+}
+
+// ❌ DEADLOCK: Non-uniform policy state
+__shared__ int per_thread_state[32];
+if (Policy::should_try_steal_per_thread(per_thread_state[threadIdx.x])) {
+    // Some threads enter, others don't → DEADLOCK
+    while (!ptx::mbarrier_try_wait_parity(&bar, phase)) {}
+}
+```
+
+### The Solution: Elect + Broadcast Pattern
+
+```cpp
+// ✅ CORRECT: Single decision, uniform control flow
+__shared__ int go;                      // Shared decision flag
+__shared__ typename Policy::State pol;  // Policy state in shared memory
+
+while (true) {
+    __syncthreads();
+
+    // Step 1: Thread 0 makes the decision
+    if (threadIdx.x == 0) {
+        go = Policy::should_try_steal(pol) ? 1 : 0;
+    }
+
+    // Step 2: Broadcast to all threads
+    __syncthreads();
+
+    // Step 3: All threads take the same branch
+    if (!go) break;  // Uniform exit
+
+    // Step 4: All threads participate in CLC operations
+    if (threadIdx.x == 0) {
+        ptx::clusterlaunchcontrol_try_cancel(&result, &bar);
+        ptx::mbarrier_arrive_expect_tx(...);
+    }
+
+    // ALL threads wait (uniform control flow)
+    while (!ptx::mbarrier_try_wait_parity(&bar, phase)) {}
+
+    // ... rest of steal logic ...
+}
+```
+
+**Key principle**: Policy logic runs in **one thread**; all threads read the **same result** and execute the **same path**.
 
 ---
 
@@ -538,12 +664,37 @@ __global__ void kernel_cluster_launch_control_policy(...) {
 
 ---
 
+## Best Practices Summary
+
+### DO ✅
+1. **Define `Policy::State`** and let the framework hold it in `__shared__`
+2. **Pass state by reference** to all callbacks
+3. **Evaluate policies in thread 0**, broadcast via `__shared__` flag
+4. **Use `__syncthreads()`** before and after policy decisions
+5. **Place decisions at safe points**: before request, after success
+6. **Use cluster scopes/fences** when `__cluster_dims__()` is set
+7. **Check `__CUDA_ARCH__ >= 1000`** at compile time
+8. **Test with different grid sizes** to catch uniformity bugs
+
+### DON'T ❌
+1. **Never use `__shared__ static`** inside policy types (UB)
+2. **Never let threads diverge** around policy decisions
+3. **Never call policy functions from multiple threads** without synchronization
+4. **Never submit requests after observing failure** (framework handles this)
+5. **Never use per-thread state** that could cause divergence
+6. **Never skip `__syncthreads()`** around policy decision points
+7. **Never access `result` before barrier completes**
+8. **Never use regular CLC calls** in cluster kernels (use `_multicast`)
+
+---
+
 ## Conclusion
 
 This minimal template-based design:
 - ✅ **3 callbacks only** (init, should_try_steal, keep_going_after_success)
 - ✅ **Safe by construction** (policies cannot violate CLC constraints)
-- ✅ **No framework state** (policies manage their own state)
+- ✅ **Framework-held state** (policies define `State`, framework holds it in `__shared__`)
+- ✅ **Uniform control flow** (thread 0 evaluates, all threads execute same path)
 - ✅ **Zero overhead** (compile-time dispatch, inlining)
 - ✅ **Type-safe** (no `void*` casts, no raw CLC API exposure)
 - ✅ **Two safe control points** (before submit, after success)
@@ -555,6 +706,7 @@ This minimal template-based design:
 - Policy cannot decode block IDs on failure (framework only calls callback on success)
 - Policy cannot use multiple submitters (framework uses `invoke_one`)
 - Policy cannot skip fences/barriers (framework manages all CLC mechanics)
+- Policy cannot cause thread divergence (framework enforces uniform control flow)
 - Skipping steal attempts is always safe (just do local work)
 
 **Advantages**:
@@ -562,10 +714,11 @@ This minimal template-based design:
 - Type safety with no runtime overhead
 - Better error messages at compile time
 - Correctness guaranteed by construction
+- No `__shared__ static` UB or uniformity pitfalls
 
 **Key Principle**: Separate concerns cleanly:
 - **Hardware (CLC)**: Validates and provides available work (safe, atomic)
 - **Policy**: Controls when to steal and when to stop (flexible, expressive)
-- **Framework**: Enforces all CLC constraints and safety invariants (safe wrapper)
+- **Framework**: Enforces all CLC constraints and safety invariants (safe wrapper, uniform control)
 
 This is the true "sched_ext for GPU scheduling" - minimal, type-safe, extensible, **safe by construction**, and powerful.

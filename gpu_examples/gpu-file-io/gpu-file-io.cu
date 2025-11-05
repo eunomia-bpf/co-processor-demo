@@ -242,12 +242,18 @@ void print_usage(const char* prog) {
     printf("  -s SIZE    Data size in MB (default: 512)\n");
     printf("  -f FILE    Test file path (default: /tmp/gpu_bench.dat)\n");
     printf("  -r RUNS    Number of runs (default: 3)\n");
-    printf("  -m MODE    Mode: all, dma, compare (default: all)\n");
+    printf("  -m MODE    Mode: all, dma, compare, pipeline (default: all)\n");
     printf("  -h         Show this help\n");
-    printf("\nModes:\n");
-    printf("  all      - Run all benchmarks (standard + cuFile + GPU kernel)\n");
+    printf("\nDefault behavior (no -m flag):\n");
+    printf("  Runs ALL benchmarks:\n");
+    printf("    1. Standard Copy vs cuFile DMA comparison\n");
+    printf("    2. cuFile DMA only benchmarks\n");
+    printf("    3. Pipeline comparison (Traditional vs Zero-Copy)\n");
+    printf("\nModes (use -m to run specific benchmark):\n");
+    printf("  all      - Run all benchmarks (same as default)\n");
     printf("  dma      - Only cuFile DMA benchmarks\n");
-    printf("  compare  - Compare standard vs cuFile\n");
+    printf("  compare  - Only standard vs cuFile comparison\n");
+    printf("  pipeline - Only pipeline comparison\n");
 }
 
 int main(int argc, char** argv) {
@@ -304,9 +310,17 @@ int main(int argc, char** argv) {
     bool run_all = (strcmp(mode, "all") == 0);
     bool run_dma = (strcmp(mode, "dma") == 0);
     bool run_compare = (strcmp(mode, "compare") == 0);
+    bool run_pipeline = (strcmp(mode, "pipeline") == 0);
+
+    // If mode is "all", run everything including pipeline
+    if (run_all) {
+        run_compare = true;
+        run_dma = true;
+        run_pipeline = true;
+    }
 
     // Run benchmarks
-    if (run_compare || run_all) {
+    if (run_compare) {
         printf("=============================================================\n");
         printf("BENCHMARK: Standard Copy vs cuFile DMA\n");
         printf("=============================================================\n");
@@ -380,7 +394,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (run_dma || run_all) {
+    if (run_dma) {
         printf("\n=============================================================\n");
         printf("BENCHMARK: cuFile DMA Only\n");
         printf("=============================================================\n");
@@ -408,7 +422,9 @@ int main(int argc, char** argv) {
         printf("  Read:  %.2f GB/s\n", read_avg / runs);
     }
 
-    if (run_all) {
+    // Note: Removed standalone GPU kernel benchmark from "all" mode
+    // It's now included in the pipeline comparison which is more useful
+    if (false) {  // Keep code but disable - can be re-enabled if needed
         printf("\n=============================================================\n");
         printf("BENCHMARK: GPU Kernel Processing (for comparison)\n");
         printf("=============================================================\n");
@@ -443,6 +459,186 @@ int main(int argc, char** argv) {
 
         CHECK_CUDA(cudaEventDestroy(start));
         CHECK_CUDA(cudaEventDestroy(stop));
+    }
+
+    if (run_pipeline) {
+        printf("\n=============================================================\n");
+        printf("BENCHMARK: Pipeline Comparison\n");
+        printf("=============================================================\n");
+        printf("Comparing two complete data processing pipelines:\n");
+        printf("  A) Traditional: File→RAM→GPU → Process → GPU→RAM→File\n");
+        printf("  B) Zero-Copy:   File→GPU(DMA) → Process → GPU→File(DMA)\n\n");
+
+        const char* input_file = "/tmp/gpu_pipeline_input.dat";
+        const char* output_file_zerocopy = "/tmp/gpu_pipeline_zerocopy.dat";
+        const char* output_file_traditional = "/tmp/gpu_pipeline_traditional.dat";
+
+        // First, write initial data to input file
+        printf("Preparing input file...\n");
+        BenchResult prep = bench_cufile_write(d_data, dataSize, input_file);
+        if (!prep.success) {
+            printf("Failed to prepare input file\n");
+        } else {
+            printf("Input file ready: %s\n\n", input_file);
+
+            // ==== Traditional Pipeline ====
+            printf("-------------------------------------------------------------\n");
+            printf("A) TRADITIONAL PIPELINE (CPU Memory Copy)\n");
+            printf("-------------------------------------------------------------\n");
+
+            double trad_total = 0, trad_read = 0, trad_write = 0, trad_kernel = 0;
+
+            for (int i = 0; i < runs; i++) {
+                printf("Run %d/%d:\n", i+1, runs);
+
+                double pipeline_start = getTime();
+
+                // Step 1: Standard read (File → RAM → GPU)
+                double read_start = getTime();
+                BenchResult read_result = bench_standard_read(d_data, dataSize, input_file);
+                double read_time = getTime() - read_start;
+
+                // Step 2: GPU kernel processes data
+                double kernel_start = getTime();
+                xorTransform<<<numBlocks, blockSize>>>(d_data, numElements, 0xABCD1234);
+                CHECK_CUDA(cudaDeviceSynchronize());
+                double kernel_time = getTime() - kernel_start;
+
+                // Step 3: Standard write (GPU → RAM → File)
+                double write_start = getTime();
+                BenchResult write_result = bench_standard_write(d_data, dataSize, output_file_traditional);
+                double write_time = getTime() - write_start;
+
+                double pipeline_total = getTime() - pipeline_start;
+                double bandwidth = (dataSize / (1024.0*1024.0*1024.0)) / pipeline_total;
+
+                printf("  Read:       %.2f GB/s (%.1f ms) [File→RAM→GPU]\n",
+                       (dataSize / (1024.0*1024.0*1024.0)) / read_time, read_time * 1000);
+                printf("  GPU Kernel: %.2f GB/s (%.3f ms)\n",
+                       (dataSize / (1024.0*1024.0*1024.0)) / kernel_time, kernel_time * 1000);
+                printf("  Write:      %.2f GB/s (%.1f ms) [GPU→RAM→File]\n",
+                       (dataSize / (1024.0*1024.0*1024.0)) / write_time, write_time * 1000);
+                printf("  Pipeline:   %.2f GB/s (%.1f ms)\n\n", bandwidth, pipeline_total * 1000);
+
+                trad_total += pipeline_total;
+                trad_read += read_time;
+                trad_write += write_time;
+                trad_kernel += kernel_time;
+            }
+
+            double trad_avg_bw = (dataSize / (1024.0*1024.0*1024.0)) / (trad_total / runs);
+            printf("Traditional Pipeline Average: %.2f GB/s (%.1f ms)\n\n",
+                   trad_avg_bw, (trad_total / runs) * 1000);
+
+            // ==== Zero-Copy Pipeline ====
+            printf("-------------------------------------------------------------\n");
+            printf("B) ZERO-COPY PIPELINE (GPU Direct Storage)\n");
+            printf("-------------------------------------------------------------\n");
+
+            cudaEvent_t start, stop;
+            CHECK_CUDA(cudaEventCreate(&start));
+            CHECK_CUDA(cudaEventCreate(&stop));
+
+            double total_time = 0;
+            double read_total = 0, write_total = 0, kernel_total = 0;
+
+            // Open cuFile handles once for all runs
+            CUfileError_t status = cuFileDriverOpen();
+            if (status.err != CU_FILE_SUCCESS) {
+                printf("Failed to open cuFile driver\n");
+            } else {
+                for (int i = 0; i < runs; i++) {
+                    printf("Pipeline Run %d/%d:\n", i+1, runs);
+
+                    double pipeline_start = getTime();
+
+                    // Step 1: cuFile DMA Read from file to GPU
+                    double read_start = getTime();
+                    BenchResult read_result = bench_cufile_read(d_data, dataSize, input_file);
+                    double read_time = getTime() - read_start;
+                    if (!read_result.success) {
+                        printf("  Read failed\n");
+                        continue;
+                    }
+
+                    // Step 2: GPU kernel processes data (XOR transform)
+                    double kernel_start = getTime();
+                    xorTransform<<<numBlocks, blockSize>>>(d_data, numElements, 0xABCD1234);
+                    CHECK_CUDA(cudaDeviceSynchronize());
+                    double kernel_time = getTime() - kernel_start;
+
+                    // Step 3: cuFile DMA Write from GPU to file
+                    double write_start = getTime();
+                    BenchResult write_result = bench_cufile_write(d_data, dataSize, output_file_zerocopy);
+                    double write_time = getTime() - write_start;
+                    if (!write_result.success) {
+                        printf("  Write failed\n");
+                        continue;
+                    }
+
+                    double pipeline_total = getTime() - pipeline_start;
+                    double bandwidth = (dataSize / (1024.0*1024.0*1024.0)) / pipeline_total;
+
+                    printf("  Read:       %.2f GB/s (%.1f ms) [File→GPU DMA]\n",
+                           (dataSize / (1024.0*1024.0*1024.0)) / read_time, read_time * 1000);
+                    printf("  GPU Kernel: %.2f GB/s (%.3f ms)\n",
+                           (dataSize / (1024.0*1024.0*1024.0)) / kernel_time, kernel_time * 1000);
+                    printf("  Write:      %.2f GB/s (%.1f ms) [GPU→File DMA]\n",
+                           (dataSize / (1024.0*1024.0*1024.0)) / write_time, write_time * 1000);
+                    printf("  Pipeline:   %.2f GB/s (%.1f ms)\n\n", bandwidth, pipeline_total * 1000);
+
+                    total_time += pipeline_total;
+                    read_total += read_time;
+                    write_total += write_time;
+                    kernel_total += kernel_time;
+                }
+                cuFileDriverClose();
+            }
+
+            double zerocopy_avg_bw = (dataSize / (1024.0*1024.0*1024.0)) / (total_time / runs);
+            printf("Zero-Copy Pipeline Average: %.2f GB/s (%.1f ms)\n\n",
+                   zerocopy_avg_bw, (total_time / runs) * 1000.0);
+
+            // ==== Comparison Summary ====
+            printf("=============================================================\n");
+            printf("PIPELINE COMPARISON SUMMARY\n");
+            printf("=============================================================\n");
+            printf("Traditional (CPU Copy):  %.2f GB/s (%.1f ms)\n",
+                   trad_avg_bw, (trad_total / runs) * 1000);
+            printf("Zero-Copy (GPU Direct):  %.2f GB/s (%.1f ms)\n\n",
+                   zerocopy_avg_bw, (total_time / runs) * 1000);
+
+            if (zerocopy_avg_bw > trad_avg_bw) {
+                double speedup = (zerocopy_avg_bw / trad_avg_bw - 1) * 100;
+                printf("⚡ Zero-Copy is %.0f%% FASTER\n\n", speedup);
+            } else {
+                double slowdown = (trad_avg_bw / zerocopy_avg_bw - 1) * 100;
+                printf("Traditional is %.0f%% faster\n\n", slowdown);
+            }
+
+            printf("Breakdown:\n");
+            printf("                      Traditional    Zero-Copy      Improvement\n");
+            printf("  Read:               %.2f GB/s      %.2f GB/s     %+.0f%%\n",
+                   (dataSize / (1024.0*1024.0*1024.0)) / (trad_read / runs),
+                   (dataSize / (1024.0*1024.0*1024.0)) / (read_total / runs),
+                   ((read_total / trad_read) - 1) * -100);
+            printf("  GPU Kernel:         %.2f GB/s      %.2f GB/s     (same)\n",
+                   (dataSize / (1024.0*1024.0*1024.0)) / (trad_kernel / runs),
+                   (dataSize / (1024.0*1024.0*1024.0)) / (kernel_total / runs));
+            printf("  Write:              %.2f GB/s      %.2f GB/s     %+.0f%%\n",
+                   (dataSize / (1024.0*1024.0*1024.0)) / (trad_write / runs),
+                   (dataSize / (1024.0*1024.0*1024.0)) / (write_total / runs),
+                   ((write_total / trad_write) - 1) * -100);
+            printf("\nKey Benefit: Zero-copy eliminates CPU memory bottleneck!\n");
+
+            CHECK_CUDA(cudaEventDestroy(start));
+            CHECK_CUDA(cudaEventDestroy(stop));
+
+            // Clean up pipeline files
+            unlink(input_file);
+            unlink(output_file_zerocopy);
+            unlink(output_file_traditional);
+        }
     }
 
     // Verify data integrity

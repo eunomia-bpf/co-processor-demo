@@ -1,0 +1,27 @@
+# Build artifacts
+gpu-file-io
+*.o
+
+# Test files
+*.dat
+/tmp/gpu_bench.dat
+/tmp/std_write.dat
+
+# Log files
+*.log
+
+# CUDA compilation temporary files
+*.ptx
+*.cubin
+*.fatbin
+
+# Editor and IDE files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -21,7 +21,6 @@ using namespace clc_policy;
 template<typename WorkloadType, typename Policy>
 __global__ void kernel_cluster_launch_control_policy(float* data, int n, int* block_count, int* steal_count,
                                                      int prologue_complexity) {
-    // CLC framework shared memory
     __shared__ uint4 result;
     __shared__ uint64_t bar;
     int phase = 0;
@@ -62,15 +61,11 @@ __global__ void kernel_cluster_launch_control_policy(float* data, int n, int* bl
         phase ^= 1;
 
         bool success = ptx::clusterlaunchcontrol_query_cancel_is_canceled(result);
-
         if (!success) {
-            break;  // Hardware says no more work
+            break;
         }
 
-        int hardware_cta_id = ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x<int>(result);
-
-        // Hardware controls what work to steal (safe)
-        bx = hardware_cta_id;
+        bx = ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x<int>(result);
 
         if (threadIdx.x == 0) {
             atomicAdd(steal_count, 1);
