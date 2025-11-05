@@ -20,7 +20,7 @@ NVCC_FLAGS = -arch=$(ARCH) --no-device-link -O3
 .PHONY: all clean test help
 
 # Default target
-all: minimal_clc_12.9_api clc_benchmark
+all: minimal_clc_12.9_api clc_benchmark clc_benchmark_workloads
 
 # Minimal CLC example - single approach
 minimal_clc_12.9_api: minimal_clc_12.9.cu
@@ -31,6 +31,11 @@ minimal_clc_12.9_api: minimal_clc_12.9.cu
 clc_benchmark: clc_benchmark.cu
 	$(NVCC) $(NVCC_FLAGS) -o clc_benchmark clc_benchmark.cu
 	@echo "✅ Built: clc_benchmark"
+
+# Workload analysis benchmark - tests different scenarios
+clc_benchmark_workloads: clc_benchmark_workloads.cu
+	$(NVCC) $(NVCC_FLAGS) -o clc_benchmark_workloads clc_benchmark_workloads.cu
+	@echo "✅ Built: clc_benchmark_workloads"
 
 # ============================================
 # TEST TARGETS
@@ -64,6 +69,11 @@ run-large: clc_benchmark
 	@echo "=== Running CLC Benchmark (Large: 16M elements) ==="
 	./clc_benchmark 16777216 256 3 10
 
+# Run workload analysis benchmark
+run-workloads: clc_benchmark_workloads
+	@echo "=== Running CLC Workload Analysis ==="
+	./clc_benchmark_workloads
+
 # ============================================
 # INFORMATION
 # ============================================
@@ -84,7 +94,7 @@ info:
 # ============================================
 
 clean:
-	rm -f minimal_clc_12.9_api clc_benchmark
+	rm -f minimal_clc_12.9_api clc_benchmark clc_benchmark_workloads
 	rm -f /tmp/clc*.ptx /tmp/clc*.cubin
 	@echo "Cleaned all binaries and temp files"
 
@@ -96,10 +106,11 @@ help:
 	@echo "Cluster Launch Control Benchmark - Makefile"
 	@echo ""
 	@echo "BUILD TARGETS:"
-	@echo "  make                    - Build all examples (default)"
-	@echo "  make all                - Build minimal example and benchmark"
-	@echo "  make minimal_clc_12.9_api - Build minimal CLC example"
-	@echo "  make clc_benchmark      - Build comprehensive benchmark"
+	@echo "  make                         - Build all examples (default)"
+	@echo "  make all                     - Build all benchmarks"
+	@echo "  make minimal_clc_12.9_api    - Build minimal CLC example"
+	@echo "  make clc_benchmark           - Build comprehensive benchmark"
+	@echo "  make clc_benchmark_workloads - Build workload analysis benchmark"
 	@echo ""
 	@echo "TEST TARGETS:"
 	@echo "  make test               - Build and run all tests"
@@ -107,6 +118,7 @@ help:
 	@echo "  make run-benchmark      - Run benchmark (1M elements, default)"
 	@echo "  make run-small          - Run benchmark (64K elements, quick)"
 	@echo "  make run-large          - Run benchmark (16M elements)"
+	@echo "  make run-workloads      - Run workload analysis (tests 8 scenarios)"
 	@echo ""
 	@echo "BENCHMARK USAGE:"
 	@echo "  ./clc_benchmark [n] [threads] [warmup] [runs]"

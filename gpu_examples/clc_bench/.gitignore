@@ -1,7 +1,7 @@
 # Binaries
 minimal_clc_12.9_api
 clc_benchmark
-
+clc_benchmark_workloads
 # Temp files
 *.ptx
 *.cubin
