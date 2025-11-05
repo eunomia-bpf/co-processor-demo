@@ -20,15 +20,10 @@ NVCC_FLAGS = -arch=$(ARCH) --no-device-link -O3
 .PHONY: all clean test help
 
 # Default target
-all: clc_benchmark_workloads clc_policy_benchmark
-
-# AI workload analysis benchmark - real-world scenarios
-clc_benchmark_workloads: clc_benchmark_workloads.cu
-	$(NVCC) $(NVCC_FLAGS) -o clc_benchmark_workloads clc_benchmark_workloads.cu
-	@echo "✅ Built: clc_benchmark_workloads"
+all: clc_policy_benchmark
 
 # Policy-based scheduler benchmark
-clc_policy_benchmark: clc_policy_benchmark.cu clc_scheduler_policy.cuh
+clc_policy_benchmark: clc_policy_benchmark.cu clc_scheduler_policy.cuh benchmark_kernels.cuh
 	$(NVCC) $(NVCC_FLAGS) -o clc_policy_benchmark clc_policy_benchmark.cu
 	@echo "✅ Built: clc_policy_benchmark"
 
@@ -36,30 +31,26 @@ clc_policy_benchmark: clc_policy_benchmark.cu clc_scheduler_policy.cuh
 # TEST TARGETS
 # ============================================
 
-test: clc_benchmark_workloads clc_policy_benchmark
-	@echo "=== Testing CLC AI Workload Benchmark ==="
+test: clc_policy_benchmark
+	@echo "=== Testing Comprehensive CLC Benchmark ==="
 	@echo ""
-	./clc_benchmark_workloads
+	./clc_policy_benchmark
 	@echo ""
 
-# Run AI workload benchmark (default: 1M elements)
-run: clc_benchmark_workloads
-	@echo "=== Running CLC AI Workload Benchmark (1M elements) ==="
-	./clc_benchmark_workloads
+# Run policy benchmark (default: 1M elements)
+run: clc_policy_benchmark
+	@echo "=== Running Comprehensive CLC Benchmark (1M elements) ==="
+	./clc_policy_benchmark
 
 # Run with different problem sizes
-run-small: clc_benchmark_workloads
-	@echo "=== Running CLC AI Workload Benchmark (256K elements) ==="
-	./clc_benchmark_workloads 262144 256
+run-small: clc_policy_benchmark
+	@echo "=== Running Comprehensive CLC Benchmark (256K elements) ==="
+	./clc_policy_benchmark 262144 256
 
-run-large: clc_benchmark_workloads
-	@echo "=== Running CLC AI Workload Benchmark (4M elements) ==="
-	./clc_benchmark_workloads 4194304 256
+run-large: clc_policy_benchmark
+	@echo "=== Running Comprehensive CLC Benchmark (4M elements) ==="
+	./clc_policy_benchmark 4194304 256
 
-# Run policy benchmark
-run-policy: clc_policy_benchmark
-	@echo "=== Running CLC Policy Benchmark (1M elements) ==="
-	./clc_policy_benchmark
 
 # ============================================
 # INFORMATION
@@ -81,7 +72,7 @@ info:
 # ============================================
 
 clean:
-	rm -f clc_benchmark_workloads clc_policy_benchmark
+	rm -f clc_policy_benchmark
 	rm -f /tmp/clc*.ptx /tmp/clc*.cubin
 	@echo "Cleaned all binaries and temp files"
 

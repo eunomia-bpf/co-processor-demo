@@ -8,23 +8,34 @@ No framework-imposed context structures. Policies define what state they need an
 
 ## Core Interface (3 Callbacks)
 
-```c
+```cpp
+// Template-based policy interface - zero runtime overhead, compile-time dispatch
+template<typename Policy>
 struct SchedOps {
     // 1. Called once when block starts
     //    Policy initializes any state it needs (shared mem, global mem, etc.)
-    __device__ void (*init)(int block_id, int total_blocks, int total_items, void* policy_state);
+    __device__ static void init(int block_id, int total_blocks, int total_items,
+                                typename Policy::State& state) {
+        Policy::init(block_id, total_blocks, total_items, state);
+    }
 
     // 2. Called in work-stealing loop to decide: should I try to steal?
     //    Returns: true = attempt steal, false = exit
-    __device__ bool (*should_steal)(int block_id, int iteration, void* policy_state);
+    __device__ static bool should_steal(int block_id, int iteration,
+                                        typename Policy::State& state) {
+        return Policy::should_steal(block_id, iteration, state);
+    }
 
     // 3. Called when should_steal() returns true
     //    Returns: target block ID to steal from, or -1 for hardware default
-    __device__ int (*select_victim)(int block_id, int iteration, void* policy_state);
+    __device__ static int select_victim(int block_id, int iteration,
+                                        typename Policy::State& state) {
+        return Policy::select_victim(block_id, iteration, state);
+    }
 };
 ```
 
-**That's it.** Just 3 callbacks + opaque state pointer.
+**That's it.** Just 3 callbacks + type-safe state management via templates.
 
 ---
 
@@ -32,8 +43,8 @@ struct SchedOps {
 
 ### 1. **No Framework State Structures**
    - No `SchedBlockCtx`, no `SchedGlobalCtx`
-   - Policy defines its own state layout
-   - Framework just provides `void* policy_state` pointer
+   - Policy defines its own state layout via `Policy::State` type
+   - Framework provides type-safe state references (no `void*`)
 
 ### 2. **Policy Controls Synchronization**
    - If policy needs atomics → it uses them
@@ -53,141 +64,176 @@ struct SchedOps {
 ## Policy State Management Patterns
 
 ### Pattern 1: No State (Greedy)
-```c
-// No state struct needed
-void* policy_state = NULL;
+```cpp
+// Policy with empty state
+struct GreedyPolicy {
+    struct State {}; // Empty state - no memory overhead
 
-__device__ void greedy_init(int bid, int total_blocks, int total_items, void* state) {
-    // Nothing to do
-}
+    __device__ static void init(int bid, int total_blocks, int total_items, State& state) {
+        // Nothing to do
+    }
 
-__device__ bool greedy_should_steal(int bid, int iter, void* state) {
-    return true;
-}
+    __device__ static bool should_steal(int bid, int iter, State& state) {
+        return true;
+    }
 
-__device__ int greedy_select_victim(int bid, int iter, void* state) {
-    return -1; // Hardware chooses
-}
+    __device__ static int select_victim(int bid, int iter, State& state) {
+        return -1; // Hardware chooses
+    }
+};
 ```
 
 ### Pattern 2: Per-Block State (Threshold)
-```c
+```cpp
 // Each block has its own state in shared memory
-struct ThresholdState {
-    int work_done;
-    float threshold;
+struct ThresholdPolicy {
+    struct State {
+        int work_done;
+        int expected_work;
+        float threshold;
+    };
+
+    __device__ static void init(int bid, int total_blocks, int total_items, State& state) {
+        if (threadIdx.x == 0) {
+            state.work_done = 0;
+            state.expected_work = total_items / total_blocks;
+            state.threshold = 0.7f;
+        }
+        __syncthreads();
+    }
+
+    __device__ static bool should_steal(int bid, int iter, State& state) {
+        return (state.work_done >= state.expected_work * state.threshold);
+    }
+
+    __device__ static int select_victim(int bid, int iter, State& state) {
+        return -1; // Let hardware choose
+    }
 };
-
-__shared__ ThresholdState my_state;
-
-__device__ void threshold_init(int bid, int total_blocks, int total_items, void* state) {
-    ThresholdState* s = (ThresholdState*)state;
-    s->work_done = 0;
-    s->threshold = 0.7f;
-}
-
-__device__ bool threshold_should_steal(int bid, int iter, void* state) {
-    ThresholdState* s = (ThresholdState*)state;
-    int expected = total_items / total_blocks;
-    return (s->work_done >= expected * s->threshold);
-}
 ```
 
 ### Pattern 3: Global Shared State (Locality)
-```c
+```cpp
 // All blocks share global state for coordination
-struct LocalityState {
-    int* block_groups;     // Device memory: group ID per block
-    int group_size;
-};
+struct LocalityPolicy {
+    struct State {
+        int* block_groups;     // Device memory: group ID per block
+        int group_size;
+        int my_group;          // Cached local copy
+    };
 
-__device__ void locality_init(int bid, int total_blocks, int total_items, void* state) {
-    LocalityState* s = (LocalityState*)state;
-    s->block_groups[bid] = bid / s->group_size;
-}
-
-__device__ int locality_select_victim(int bid, int iter, void* state) {
-    LocalityState* s = (LocalityState*)state;
-    int my_group = s->block_groups[bid];
-
-    // Try to find victim in same group
-    for (int i = 0; i < s->group_size; i++) {
-        int candidate = my_group * s->group_size + i;
-        if (candidate != bid) return candidate;
+    __device__ static void init(int bid, int total_blocks, int total_items, State& state) {
+        if (threadIdx.x == 0) {
+            state.block_groups[bid] = bid / state.group_size;
+            state.my_group = state.block_groups[bid];
+        }
+        __syncthreads();
     }
-    return -1;
-}
+
+    __device__ static bool should_steal(int bid, int iter, State& state) {
+        return true;
+    }
+
+    __device__ static int select_victim(int bid, int iter, State& state) {
+        // Try to find victim in same group
+        for (int i = 0; i < state.group_size; i++) {
+            int candidate = state.my_group * state.group_size + i;
+            if (candidate != bid) return candidate;
+        }
+        return -1;
+    }
+};
 ```
 
 ### Pattern 4: Adaptive State (Work-Rate)
-```c
+```cpp
 // Per-block state with runtime metrics
-struct AdaptiveState {
-    int work_done;
-    unsigned long long start_time;
-    float work_rate;
-};
+struct AdaptivePolicy {
+    struct State {
+        int work_done;
+        int expected_work;
+        unsigned long long start_time;
+        float work_rate;
+    };
 
-__shared__ AdaptiveState my_state;
-
-__device__ bool adaptive_should_steal(int bid, int iter, void* state) {
-    AdaptiveState* s = (AdaptiveState*)state;
-
-    // Update work rate periodically
-    if (iter % 10 == 0) {
-        unsigned long long now = clock64();
-        s->work_rate = (float)s->work_done / (float)(now - s->start_time);
+    __device__ static void init(int bid, int total_blocks, int total_items, State& state) {
+        if (threadIdx.x == 0) {
+            state.work_done = 0;
+            state.expected_work = total_items / total_blocks;
+            state.start_time = clock64();
+            state.work_rate = 0.0f;
+        }
+        __syncthreads();
     }
 
-    // Fast workers steal earlier (lower threshold)
-    float threshold = 0.5f / (1.0f + s->work_rate);
-    return (s->work_done >= threshold * expected_work);
-}
+    __device__ static bool should_steal(int bid, int iter, State& state) {
+        // Update work rate periodically
+        if (threadIdx.x == 0 && iter % 10 == 0) {
+            unsigned long long now = clock64();
+            state.work_rate = (float)state.work_done / (float)(now - state.start_time);
+        }
+
+        // Fast workers steal earlier (lower threshold)
+        float threshold = 0.5f / (1.0f + state.work_rate);
+        return (state.work_done >= threshold * state.expected_work);
+    }
+
+    __device__ static int select_victim(int bid, int iter, State& state) {
+        return -1; // Hardware chooses
+    }
+};
 ```
 
 ---
 
 ## Example: Complete Threshold Policy
 
-```c
-// 1. Define policy state
-struct ThresholdState {
-    int work_done;
-    int expected_work;
-    float threshold;
-};
+```cpp
+// 1. Define policy with state and callbacks
+struct ThresholdPolicy {
+    struct State {
+        int work_done;
+        int expected_work;
+        float threshold;
+    };
 
-// 2. Implement callbacks
-__device__ void threshold_init(int bid, int total_blocks, int total_items, void* state) {
-    if (threadIdx.x == 0) {
-        ThresholdState* s = (ThresholdState*)state;
-        s->work_done = 0;
-        s->expected_work = total_items / total_blocks;
-        s->threshold = 0.7f;
+    __device__ static void init(int bid, int total_blocks, int total_items, State& state) {
+        if (threadIdx.x == 0) {
+            state.work_done = 0;
+            state.expected_work = total_items / total_blocks;
+            state.threshold = 0.7f;
+        }
+        __syncthreads();
     }
-    __syncthreads();
-}
 
-__device__ bool threshold_should_steal(int bid, int iter, void* state) {
-    ThresholdState* s = (ThresholdState*)state;
-    return (s->work_done >= s->expected_work * s->threshold);
-}
+    __device__ static bool should_steal(int bid, int iter, State& state) {
+        return (state.work_done >= state.expected_work * state.threshold);
+    }
 
-__device__ int threshold_select_victim(int bid, int iter, void* state) {
-    return -1; // Let hardware choose
-}
-
-// 3. Register policy
-__device__ SchedOps threshold_ops = {
-    threshold_init,
-    threshold_should_steal,
-    threshold_select_victim
+    __device__ static int select_victim(int bid, int iter, State& state) {
+        return -1; // Let hardware choose
+    }
 };
 
-// 4. Use in kernel
-__shared__ ThresholdState my_policy_state;
-SchedOps* ops = &threshold_ops;
-ops->init(blockIdx.x, gridDim.x, n, &my_policy_state);
+// 2. Use in kernel (template instantiation)
+template<typename Policy>
+__global__ void work_stealing_kernel(float* data, int n) {
+    __shared__ typename Policy::State policy_state;
+
+    // Initialize policy
+    Policy::init(blockIdx.x, gridDim.x, n, policy_state);
+
+    // Work-stealing loop
+    int iteration = 0;
+    while (Policy::should_steal(blockIdx.x, iteration, policy_state)) {
+        int victim = Policy::select_victim(blockIdx.x, iteration, policy_state);
+        // ... CLC stealing logic ...
+        iteration++;
+    }
+}
+
+// 3. Launch with specific policy
+work_stealing_kernel<ThresholdPolicy><<<blocks, threads>>>(data, n);
 ```
 
 ---
@@ -212,20 +258,23 @@ ops->init(blockIdx.x, gridDim.x, n, &my_policy_state);
 ### 4. **Zero Overhead**
    - No unused state fields
    - No framework bookkeeping
-   - Direct function pointers
+   - Compile-time dispatch (no function pointers)
+   - Compiler can inline all callbacks
 
 ---
 
 ## Comparison with Context-Based Design
 
-| Aspect | Context-Based | Minimal (This) |
+| Aspect | Context-Based | Template-Based (This) |
 |--------|--------------|----------------|
 | Callbacks | 3 | 3 |
 | Framework State | `SchedBlockCtx`, `SchedGlobalCtx` | None |
-| Policy State | Fixed fields + custom[4] | Fully custom |
+| Policy State | Fixed fields + custom[4] | `Policy::State` (fully custom) |
 | Memory Layout | Framework decides | Policy decides |
 | Synchronization | Framework provides | Policy implements |
-| Overhead | Some unused fields | Zero |
+| Dispatch | Function pointers (runtime) | Templates (compile-time) |
+| Type Safety | `void*` casts required | Fully type-safe |
+| Overhead | Some unused fields + indirection | Zero |
 | Flexibility | Medium | Maximum |
 
 ---
@@ -235,7 +284,7 @@ ops->init(blockIdx.x, gridDim.x, n, &my_policy_state);
 ### 1. **Priority-Based Work Stealing**
    - State: Priority queue in global memory
    - `select_victim()` reads queue, picks highest priority
-   - Requires custom data structure → easy with `void*`
+   - Requires custom data structure → easy with `Policy::State`
 
 ### 2. **Load-Imbalance Detector**
    - State: Atomics to track block progress
@@ -262,32 +311,39 @@ ops->init(blockIdx.x, gridDim.x, n, &my_policy_state);
 ## Implementation Strategy
 
 ### Host Side:
-```c
-// 1. Allocate policy state (if needed)
-void* d_policy_state;
-cudaMalloc(&d_policy_state, policy_state_size);
+```cpp
+// 1. Allocate global policy state (if policy needs it)
+typename MyPolicy::State* d_global_state;
+cudaMalloc(&d_global_state, sizeof(typename MyPolicy::State));
 
-// 2. Initialize policy parameters
-init_policy_on_host(d_policy_state, params);
+// 2. Initialize global policy parameters (if needed)
+init_policy_on_host(d_global_state, params);
 
-// 3. Launch kernel with policy
-kernel<<<blocks, threads>>>(data, n, &policy_ops, d_policy_state);
+// 3. Launch kernel with policy template parameter
+work_stealing_kernel<MyPolicy><<<blocks, threads>>>(data, n, d_global_state);
 ```
 
 ### Kernel Side:
-```c
-__global__ void kernel(float* data, int n, SchedOps* ops, void* policy_state) {
-    // Per-block state (if policy uses shared memory)
-    extern __shared__ char shared_state[];
+```cpp
+template<typename Policy>
+__global__ void work_stealing_kernel(float* data, int n,
+                                     typename Policy::State* global_state = nullptr) {
+    // Per-block state in shared memory
+    __shared__ typename Policy::State policy_state;
+
+    // Copy global state to shared memory if needed
+    if (global_state != nullptr && threadIdx.x == 0) {
+        policy_state = *global_state;
+    }
+    __syncthreads();
 
     // Initialize policy
-    ops->init(blockIdx.x, gridDim.x, n, shared_state);
+    Policy::init(blockIdx.x, gridDim.x, n, policy_state);
 
-    // Work loop
+    // Work-stealing loop
     int iteration = 0;
-    while (ops->should_steal(blockIdx.x, iteration, shared_state)) {
-        // Try to steal work...
-        int victim = ops->select_victim(blockIdx.x, iteration, shared_state);
+    while (Policy::should_steal(blockIdx.x, iteration, policy_state)) {
+        int victim = Policy::select_victim(blockIdx.x, iteration, policy_state);
         // ... CLC stealing logic ...
         iteration++;
     }
@@ -298,13 +354,20 @@ __global__ void kernel(float* data, int n, SchedOps* ops, void* policy_state) {
 
 ## Conclusion
 
-This minimal design:
+This minimal template-based design:
 - ✅ **3 callbacks only** (init, should_steal, select_victim)
-- ✅ **No framework state** (just `void*`)
+- ✅ **No framework state** (just `Policy::State`)
 - ✅ **Policy controls everything** (state, sync, memory)
-- ✅ **Zero overhead** (no unused fields)
+- ✅ **Zero overhead** (compile-time dispatch, inlining)
+- ✅ **Type-safe** (no `void*` casts)
 - ✅ **Maximally flexible** (any policy expressible)
+
+**Advantages over function pointers**:
+- Compile-time optimization and inlining
+- Type safety with no runtime overhead
+- Better error messages at compile time
+- No function pointer indirection cost
 
 **Trade-off**: Policies need to manage their own state carefully, but they have complete control.
 
-This is the true "sched_ext for GPU scheduling" - minimal, general, and extensible.
+This is the true "sched_ext for GPU scheduling" - minimal, type-safe, and extensible.

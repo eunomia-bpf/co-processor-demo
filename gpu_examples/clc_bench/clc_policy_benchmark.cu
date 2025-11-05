@@ -1,4 +1,4 @@
-// CLC Policy Benchmark: Demonstrating Custom Scheduler Policies
+// CLC Policy Benchmark: Demonstrating and Comparing Scheduler Policies
 // Based on the interface defined in clc_scheduler_policy.cuh
 
 #include <stdio.h>
@@ -8,6 +8,7 @@
 #include <cooperative_groups.h>
 #include "ai_workloads.cuh"
 #include "clc_scheduler_policy.cuh"
+#include "benchmark_kernels.cuh"
 
 namespace cg = cooperative_groups;
 namespace ptx = cuda::ptx;
@@ -89,12 +90,6 @@ __global__ void kernel_cluster_launch_control_policy(float* data, int n, int* bl
 // Benchmark Runner
 // ============================================
 
-struct BenchmarkResult {
-    float avg_time_ms;
-    float avg_blocks;
-    float avg_steals;
-};
-
 template<typename WorkloadType, typename Policy>
 BenchmarkResult run_clc_policy(float* d_data, int n, int blocks, int threads,
                                float* h_original, int prologue, int warmup, int runs) {
@@ -149,29 +144,43 @@ BenchmarkResult run_clc_policy(float* d_data, int n, int blocks, int threads,
 }
 
 template<typename WorkloadType>
-void run_policy_comparison(const char* scenario, int prologue,
-                           float* d_data, int n, int threads, float* h_data) {
+void run_scenario(const char* scenario, int prologue,
+                  float* d_data, int n, int threads, cudaDeviceProp& prop, float* h_data) {
+    int blocks_fixed_work = (n + threads - 1) / threads;
+    int blocks_fixed_blocks = prop.multiProcessorCount * 2;
     int blocks_clc = (n + threads - 1) / threads;
     int warmup = 3;
     int runs = 10;
 
     printf("\n--- Scenario: %s (Prologue: %d) ---\n", scenario, prologue);
-    printf("%-20s | %10s | %10s | %10s\n", "Policy", "Time (ms)", "Blocks", "Steals");
-    printf("--------------------------------------------------------\n");
+    printf("%-25s | %10s | %10s | %10s\n", "Scheduler", "Time (ms)", "Blocks", "Steals");
+    printf("------------------------------------------------------------------\n");
 
-    // Baseline: DefaultGreedy Policy
-    BenchmarkResult r_greedy = run_clc_policy<WorkloadType, DefaultGreedyPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
-    printf("%-20s | %10.3f | %10.0f | %10.0f\n", "DefaultGreedy", r_greedy.avg_time_ms, r_greedy.avg_blocks, r_greedy.avg_steals);
+    // Run Fixed Work
+    BenchmarkResult r_fw = run_fixed_work<WorkloadType>(d_data, n, blocks_fixed_work, threads, h_data, prologue, warmup, runs);
+    printf("%-25s | %10.3f | %10.0f | %10.0f\n", "FixedWork", r_fw.avg_time_ms, r_fw.avg_blocks, r_fw.avg_steals);
 
-    // Test: PriorityBased Policy
-    BenchmarkResult r_priority = run_clc_policy<WorkloadType, PriorityBasedPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
-    printf("%-20s | %10.3f | %10.0f | %10.0f\n", "PriorityBased", r_priority.avg_time_ms, r_priority.avg_blocks, r_priority.avg_steals);
+    // Run Fixed Blocks
+    BenchmarkResult r_fb = run_fixed_blocks<WorkloadType>(d_data, n, blocks_fixed_blocks, threads, h_data, prologue, warmup, runs);
+    printf("%-25s | %10.3f | %10.0f | %10.0f\n", "FixedBlocks", r_fb.avg_time_ms, r_fb.avg_blocks, r_fb.avg_steals);
 
-    // Analysis
-    float speedup = ((r_greedy.avg_time_ms - r_priority.avg_time_ms) / r_greedy.avg_time_ms) * 100.0f;
-    printf("Benefit of Priority: %.2f%% speedup vs Greedy.\n", speedup);
-    printf("Note: A slowdown is expected for this simple priority demo due to overhead.\n");
-    printf("A real-world scenario with dependent work would show a larger benefit.\n");
+    // Run CLC Baseline (no policy framework)
+    BenchmarkResult r_clc_base = run_clc_baseline<WorkloadType>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
+    printf("%-25s | %10.3f | %10.0f | %10.0f\n", "CLC (Baseline)", r_clc_base.avg_time_ms, r_clc_base.avg_blocks, r_clc_base.avg_steals);
+
+    // Run CLC with DefaultGreedy Policy
+    BenchmarkResult r_clc_greedy = run_clc_policy<WorkloadType, DefaultGreedyPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
+    printf("%-25s | %10.3f | %10.0f | %10.0f\n", "CLC (Greedy Policy)", r_clc_greedy.avg_time_ms, r_clc_greedy.avg_blocks, r_clc_greedy.avg_steals);
+
+    // Run CLC with PriorityBased Policy
+    BenchmarkResult r_clc_priority = run_clc_policy<WorkloadType, PriorityBasedPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
+    printf("%-25s | %10.3f | %10.0f | %10.0f\n", "CLC (Priority Policy)", r_clc_priority.avg_time_ms, r_clc_priority.avg_blocks, r_clc_priority.avg_steals);
+    
+    printf("------------------------------------------------------------------\n");
+    float framework_overhead = ((r_clc_greedy.avg_time_ms - r_clc_base.avg_time_ms) / r_clc_base.avg_time_ms) * 100.0f;
+    float policy_benefit = ((r_clc_base.avg_time_ms - r_clc_priority.avg_time_ms) / r_clc_base.avg_time_ms) * 100.0f;
+    printf("Policy Framework Overhead: %.2f%% (Greedy Policy vs. Baseline)\n", framework_overhead);
+    printf("Benefit of Priority Policy: %.2f%% speedup vs. Baseline CLC.\n", policy_benefit);
 }
 
 int main(int argc, char** argv) {
@@ -198,15 +207,14 @@ int main(int argc, char** argv) {
     cudaMalloc(&d_data, n * sizeof(float));
 
     printf("========================================================\n");
-    printf("CLC Scheduler Policy Benchmark\n");
+    printf("Comprehensive CLC Scheduler Benchmark\n");
     printf("Device: %s (CC %d.%d)\n", prop.name, prop.major, prop.minor);
     printf("Elements: %d, Threads/Block: %d\n", n, threads);
     printf("========================================================\n");
 
-    // For this benchmark, we will use a workload where priority could matter,
-    // like MixtureOfExperts where some experts might be on a critical path.
-    run_policy_comparison<MixtureOfExperts>(get_workload_name<MixtureOfExperts>(), 75, d_data, n, threads, h_data);
-    run_policy_comparison<NLPVariableSequence>(get_workload_name<NLPVariableSequence>(), 80, d_data, n, threads, h_data);
+    run_scenario<MixtureOfExperts>(get_workload_name<MixtureOfExperts>(), 75, d_data, n, threads, prop, h_data);
+    run_scenario<NLPVariableSequence>(get_workload_name<NLPVariableSequence>(), 80, d_data, n, threads, prop, h_data);
+    run_scenario<GraphNeuralNetwork>(get_workload_name<GraphNeuralNetwork>(), 50, d_data, n, threads, prop, h_data);
 
     cudaFree(d_data);
     free(h_data);
