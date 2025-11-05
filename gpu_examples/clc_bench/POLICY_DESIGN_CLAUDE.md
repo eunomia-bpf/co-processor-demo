@@ -6,186 +6,166 @@
 
 **Key Insight**: The safe control point is deciding **whether to continue stealing**, not selecting arbitrary work IDs. Policies control which blocks participate in work stealing and when they exit.
 
-## Core Interface (2 Callbacks)
+## Core Interface (3 Callbacks)
 
 ```cpp
 // Template-based policy interface - zero runtime overhead, compile-time dispatch
 template<typename Policy>
 struct SchedulerPolicy {
-    // 1. Called once when block starts
-    //    Policy initializes any state it needs
-    __device__ static void init(int block_id, int total_blocks, int total_items,
-                                typename Policy::State& state);
+    // 1. Called once at kernel start - initialize policy state
+    __device__ static void init();
 
-    // 2. Called before each steal attempt: should this block continue stealing?
-    //    Returns: true = continue stealing, false = exit
-    __device__ static bool should_continue(int block_id, int iteration,
-                                           typename Policy::State& state);
+    // 2. Called BEFORE submitting a steal request: should we try to steal?
+    //    Returns: false = skip this steal attempt (safe), true = submit request
+    __device__ static bool should_try_steal();
+
+    // 3. Called AFTER successful steal: should we continue to next iteration?
+    //    Returns: false = exit loop, true = continue stealing
+    //    Parameters: stolen_bx = the block ID we just stole
+    __device__ static bool keep_going_after_success(int stolen_bx);
 };
 ```
 
-**That's it.** Just 2 callbacks + type-safe state management via templates.
+**That's it.** Just 3 callbacks. Policies manage their own state (in shared memory, registers, or global memory) if needed.
 
 ---
 
 ## Why This is Minimal Yet Sufficient
 
-### 1. **No Framework State Structures**
-   - No context structs imposed by framework
-   - Policy defines its own state layout via `Policy::State` type
-   - Framework provides type-safe state references
+### 1. **Safe by Construction**
+   - Policy cannot violate CLC constraints (no access to raw CLC APIs)
+   - Two safe control points: before submitting request, after successful steal
+   - Cannot submit after failure (framework handles exit immediately)
+   - Policies manage their own state (framework doesn't impose structure)
 
-### 2. **Policy Controls Continuation**
-   - `should_continue()` decides when each block exits the stealing loop
-   - Hardware (CLC) controls what work gets stolen (safe)
+### 2. **Policy Controls Participation**
+   - `should_try_steal()` decides whether to submit a steal request (can skip safely)
+   - `keep_going_after_success()` decides whether to continue after successful steal
+   - Hardware (CLC) controls what work gets stolen (validated by hardware)
    - Policy controls which blocks participate and for how long
 
 ### 3. **All Scheduling Policies Expressible**
-   - **Greedy**: `should_continue()` always returns true
-   - **Threshold**: Stop after doing N work items
-   - **Throttling**: Only some blocks steal aggressively
+   - **Greedy**: Both callbacks always return true
+   - **Max Steals**: Stop after N successful steals
+   - **Time Budget**: Stop after T nanoseconds (using `clock64()`)
+   - **Throttling**: Skip steal attempts on some iterations
    - **Load Balancing**: Stop after fair share of work
-   - **Adaptive**: Adjust based on runtime metrics
-   - **Priority**: Different blocks have different iteration budgets
+   - **Composable**: AND/OR multiple policies together
 
 ---
 
-## Policy State Management Patterns
+## Policy Examples
 
-### Pattern 1: No State (Greedy)
+### Pattern 1: Greedy (Always Steal)
 ```cpp
-// Policy with empty state
 struct GreedyPolicy {
-    struct State {}; // Empty state - no memory overhead
-
-    __device__ static void init(int block_id, int total_blocks, int total_items, State& state) {
-        // No-op
+    __device__ static void init() {
+        // No state to initialize
     }
 
-    __device__ static bool should_continue(int block_id, int iteration, State& state) {
+    __device__ static bool should_try_steal() {
+        return true;  // Always submit steal request
+    }
+
+    __device__ static bool keep_going_after_success(int stolen_bx) {
         return true;  // Always continue
     }
 };
 ```
 
-### Pattern 2: Per-Block State (Threshold)
+### Pattern 2: Max Steals (Stop After N Successes)
 ```cpp
-// Each block has its own state in shared memory
-struct ThresholdPolicy {
-    struct State {
-        int work_done;
-        int expected_work;
-        float threshold;
-    };
+struct MaxStealsPolicy {
+    __shared__ static int steals_done;  // Track successes in shared memory
+    static constexpr int max_steals = 8;
 
-    __device__ static void init(int block_id, int total_blocks, int total_items, State& state) {
+    __device__ static void init() {
         if (threadIdx.x == 0) {
-            state.work_done = 0;
-            state.expected_work = total_items / total_blocks;
-            state.threshold = 0.7f;
+            steals_done = 0;
         }
         __syncthreads();
     }
 
-    __device__ static bool should_continue(int block_id, int iteration, State& state) {
-        // Stop after doing 70% of expected work
-        return (state.work_done < state.expected_work * state.threshold);
-    }
-};
-```
-
-### Pattern 3: Block-Level Throttling
-```cpp
-// Control which blocks steal aggressively
-struct ThrottlePolicy {
-    struct State {
-        bool is_aggressive;
-    };
-
-    __device__ static void init(int block_id, int total_blocks, int total_items, State& state) {
-        // Only first half of blocks are aggressive
-        state.is_aggressive = (block_id < total_blocks / 2);
+    __device__ static bool should_try_steal() {
+        return steals_done < max_steals;
     }
 
-    __device__ static bool should_continue(int block_id, int iteration, State& state) {
-        if (state.is_aggressive) {
-            return true;  // Keep stealing
-        } else {
-            return iteration < 2;  // Only steal twice, then exit
-        }
-    }
-};
-```
-
-### Pattern 4: Adaptive State (Work-Rate Based)
-```cpp
-// Per-block state with runtime metrics
-struct AdaptivePolicy {
-    struct State {
-        int work_done;
-        int expected_work;
-        unsigned long long start_time;
-        float work_rate;
-    };
-
-    __device__ static void init(int block_id, int total_blocks, int total_items, State& state) {
+    __device__ static bool keep_going_after_success(int stolen_bx) {
         if (threadIdx.x == 0) {
-            state.work_done = 0;
-            state.expected_work = total_items / total_blocks;
-            state.start_time = clock64();
-            state.work_rate = 0.0f;
+            atomicAdd(&steals_done, 1);
+        }
+        __syncthreads();
+        return steals_done < max_steals;
+    }
+};
+```
+
+### Pattern 3: Iteration-Based Throttling
+```cpp
+struct EveryNthIterationPolicy {
+    __shared__ static int iteration;
+    static constexpr int N = 2;  // Only steal every 2nd iteration
+
+    __device__ static void init() {
+        if (threadIdx.x == 0) {
+            iteration = 0;
         }
         __syncthreads();
     }
 
-    __device__ static bool should_continue(int block_id, int iteration, State& state) {
-        // Update work rate periodically
-        if (threadIdx.x == 0 && iteration % 10 == 0) {
-            unsigned long long now = clock64();
-            state.work_rate = (float)state.work_done / (float)(now - state.start_time);
-        }
+    __device__ static bool should_try_steal() {
+        bool result = (iteration % N) == 0;
+        if (threadIdx.x == 0) iteration++;
+        __syncthreads();
+        return result;
+    }
 
-        // Fast workers steal earlier (lower threshold)
-        float threshold = 0.5f / (1.0f + state.work_rate);
-        return (state.work_done < threshold * state.expected_work);
+    __device__ static bool keep_going_after_success(int stolen_bx) {
+        return true;  // Continue (throttling happens in should_try_steal)
     }
 };
 ```
 
-### Pattern 5: Global Coordination (Concurrency Control)
+### Pattern 4: Block-Based Policy (Different Behavior Per Block)
 ```cpp
-// Use global atomics for cross-block coordination
-struct ConcurrencyControlPolicy {
-    struct State {
-        int* global_active_stealers;  // Shared across all blocks
-        bool is_stealing;
-        int max_stealers;
-    };
-
-    __device__ static void init(int block_id, int total_blocks, int total_items, State& state) {
-        state.max_stealers = total_blocks / 4;  // Max 25% blocks stealing at once
-        state.is_stealing = false;
+struct FirstHalfOnly {
+    __device__ static void init() {
+        // No state to initialize
     }
 
-    __device__ static bool should_continue(int block_id, int iteration, State& state) {
-        if (threadIdx.x == 0) {
-            int active = atomicAdd(state.global_active_stealers, 0);  // Read
+    __device__ static bool should_try_steal() {
+        // Only first half of blocks steal aggressively
+        return blockIdx.x < (gridDim.x / 2);
+    }
 
-            if (!state.is_stealing && active < state.max_stealers) {
-                // Try to become an active stealer
-                atomicAdd(state.global_active_stealers, 1);
-                state.is_stealing = true;
-            } else if (state.is_stealing && active > state.max_stealers) {
-                // Too many stealers, back off
-                atomicSub(state.global_active_stealers, 1);
-                state.is_stealing = false;
-            }
-        }
-        __syncthreads();
-
-        return state.is_stealing;
+    __device__ static bool keep_going_after_success(int stolen_bx) {
+        return blockIdx.x < (gridDim.x / 2);
     }
 };
+```
+
+### Pattern 5: Composable Policies (AND Combination)
+```cpp
+// Combine multiple policies with AND logic
+template<typename P1, typename P2>
+struct AndPolicy {
+    __device__ static void init() {
+        P1::init();
+        P2::init();
+    }
+
+    __device__ static bool should_try_steal() {
+        return P1::should_try_steal() && P2::should_try_steal();
+    }
+
+    __device__ static bool keep_going_after_success(int stolen_bx) {
+        return P1::keep_going_after_success(stolen_bx) &&
+               P2::keep_going_after_success(stolen_bx);
+    }
+};
+
+// Example: Only first half of blocks + max 8 steals each
+using SelectiveThrottled = AndPolicy<FirstHalfOnly, MaxStealsPolicy>;
 ```
 
 ---
@@ -561,23 +541,31 @@ __global__ void kernel_cluster_launch_control_policy(...) {
 ## Conclusion
 
 This minimal template-based design:
-- ✅ **2 callbacks only** (init, should_continue)
-- ✅ **Safe by design** (hardware controls work selection)
-- ✅ **No framework state** (just `Policy::State`)
+- ✅ **3 callbacks only** (init, should_try_steal, keep_going_after_success)
+- ✅ **Safe by construction** (policies cannot violate CLC constraints)
+- ✅ **No framework state** (policies manage their own state)
 - ✅ **Zero overhead** (compile-time dispatch, inlining)
-- ✅ **Type-safe** (no `void*` casts)
-- ✅ **Multi-level control** (block participation, iteration limits, global coordination)
+- ✅ **Type-safe** (no `void*` casts, no raw CLC API exposure)
+- ✅ **Two safe control points** (before submit, after success)
+- ✅ **Composable** (AND/OR multiple policies together)
 - ✅ **Maximally expressive** (all scheduling policies expressible)
+
+**Safety Guarantees**:
+- Policy cannot submit after observing failure (framework exits immediately)
+- Policy cannot decode block IDs on failure (framework only calls callback on success)
+- Policy cannot use multiple submitters (framework uses `invoke_one`)
+- Policy cannot skip fences/barriers (framework manages all CLC mechanics)
+- Skipping steal attempts is always safe (just do local work)
 
 **Advantages**:
 - Compile-time optimization and inlining
 - Type safety with no runtime overhead
 - Better error messages at compile time
-- Correctness guaranteed by design
+- Correctness guaranteed by construction
 
 **Key Principle**: Separate concerns cleanly:
-- **Hardware (CLC)**: Validates and provides available work (safe)
-- **Policy**: Controls which blocks participate and when they exit (flexible)
-- **Framework**: Integrates both with minimal glue code (simple)
+- **Hardware (CLC)**: Validates and provides available work (safe, atomic)
+- **Policy**: Controls when to steal and when to stop (flexible, expressive)
+- **Framework**: Enforces all CLC constraints and safety invariants (safe wrapper)
 
-This is the true "sched_ext for GPU scheduling" - minimal, type-safe, extensible, safe, and powerful.
+This is the true "sched_ext for GPU scheduling" - minimal, type-safe, extensible, **safe by construction**, and powerful.

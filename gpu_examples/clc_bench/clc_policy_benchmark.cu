@@ -21,16 +21,13 @@ using namespace clc_policy;
 template<typename WorkloadType, typename Policy>
 __global__ void kernel_cluster_launch_control_policy(float* data, int n, int* block_count, int* steal_count,
                                                      int prologue_complexity) {
-    // Policy-specific shared memory
-    __shared__ typename Policy::SharedMemory policy_smem;
-
     // CLC framework shared memory
     __shared__ uint4 result;
     __shared__ uint64_t bar;
     int phase = 0;
 
     // Initialize the scheduler policy
-    Policy::init(policy_smem);
+    Policy::init();
     __syncthreads();
 
     if (cg::thread_block::thread_rank() == 0)
@@ -41,6 +38,12 @@ __global__ void kernel_cluster_launch_control_policy(float* data, int n, int* bl
 
     while (true) {
         __syncthreads();
+
+        // Policy hook: should we try to steal?
+        bool should_steal = Policy::should_try_steal();
+        if (!should_steal) {
+            break;  // Policy decided to exit
+        }
 
         if (cg::thread_block::thread_rank() == 0) {
             ptx::fence_proxy_async_generic_sync_restrict(ptx::sem_acquire, ptx::space_cluster, ptx::scope_cluster);
@@ -60,25 +63,26 @@ __global__ void kernel_cluster_launch_control_policy(float* data, int n, int* bl
 
         bool success = ptx::clusterlaunchcontrol_query_cancel_is_canceled(result);
 
-        // Policy hook: check for preemption
-        if (Policy::should_preempt(policy_smem)) {
-            break;
-        }
-
         if (!success) {
-            break;
+            break;  // Hardware says no more work
         }
 
         int hardware_cta_id = ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x<int>(result);
-        
-        // Policy hook: select the next work item
-        bx = Policy::select_work(policy_smem, hardware_cta_id);
+
+        // Hardware controls what work to steal (safe)
+        bx = hardware_cta_id;
 
         if (threadIdx.x == 0) {
             atomicAdd(steal_count, 1);
         }
 
         ptx::fence_proxy_async_generic_sync_restrict(ptx::sem_release, ptx::space_shared, ptx::scope_cluster);
+
+        // Policy hook: should we continue after this success?
+        bool keep_going = Policy::keep_going_after_success(bx);
+        if (!keep_going) {
+            break;  // Policy decided to stop
+        }
     }
 
     if (threadIdx.x == 0) {
@@ -168,19 +172,23 @@ void run_scenario(const char* scenario, int prologue,
     BenchmarkResult r_clc_base = run_clc_baseline<WorkloadType>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
     printf("%-25s | %10.3f | %10.0f | %10.0f\n", "CLC (Baseline)", r_clc_base.avg_time_ms, r_clc_base.avg_blocks, r_clc_base.avg_steals);
 
-    // Run CLC with DefaultGreedy Policy
-    BenchmarkResult r_clc_greedy = run_clc_policy<WorkloadType, DefaultGreedyPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
+    // Run CLC with Greedy Policy
+    BenchmarkResult r_clc_greedy = run_clc_policy<WorkloadType, GreedyPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
     printf("%-25s | %10.3f | %10.0f | %10.0f\n", "CLC (Greedy Policy)", r_clc_greedy.avg_time_ms, r_clc_greedy.avg_blocks, r_clc_greedy.avg_steals);
 
-    // Run CLC with PriorityBased Policy
-    BenchmarkResult r_clc_priority = run_clc_policy<WorkloadType, PriorityBasedPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
-    printf("%-25s | %10.3f | %10.0f | %10.0f\n", "CLC (Priority Policy)", r_clc_priority.avg_time_ms, r_clc_priority.avg_blocks, r_clc_priority.avg_steals);
-    
+    // Run CLC with MaxSteals Policy
+    BenchmarkResult r_clc_maxsteals = run_clc_policy<WorkloadType, MaxStealsPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
+    printf("%-25s | %10.3f | %10.0f | %10.0f\n", "CLC (MaxSteals Policy)", r_clc_maxsteals.avg_time_ms, r_clc_maxsteals.avg_blocks, r_clc_maxsteals.avg_steals);
+
+    // Run CLC with Voting Policy
+    BenchmarkResult r_clc_voting = run_clc_policy<WorkloadType, VotingPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
+    printf("%-25s | %10.3f | %10.0f | %10.0f\n", "CLC (Voting Policy)", r_clc_voting.avg_time_ms, r_clc_voting.avg_blocks, r_clc_voting.avg_steals);
+
     printf("------------------------------------------------------------------\n");
     float framework_overhead = ((r_clc_greedy.avg_time_ms - r_clc_base.avg_time_ms) / r_clc_base.avg_time_ms) * 100.0f;
-    float policy_benefit = ((r_clc_base.avg_time_ms - r_clc_priority.avg_time_ms) / r_clc_base.avg_time_ms) * 100.0f;
+    float maxsteals_benefit = ((r_clc_base.avg_time_ms - r_clc_maxsteals.avg_time_ms) / r_clc_base.avg_time_ms) * 100.0f;
     printf("Policy Framework Overhead: %.2f%% (Greedy Policy vs. Baseline)\n", framework_overhead);
-    printf("Benefit of Priority Policy: %.2f%% speedup vs. Baseline CLC.\n", policy_benefit);
+    printf("MaxSteals Policy Benefit: %.2f%% speedup vs. Baseline CLC.\n", maxsteals_benefit);
 }
 
 int main(int argc, char** argv) {

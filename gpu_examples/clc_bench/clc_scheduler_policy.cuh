@@ -1,9 +1,12 @@
 //
-// Cluster Launch Control (CLC) - Programmable Scheduler Policy Interface
+// Cluster Launch Control (CLC) - Safe Scheduler Policy Interface
 //
-// This header defines a minimal, general-purpose interface for creating
+// This header defines a minimal, safe-by-construction interface for creating
 // custom scheduling policies on top of the CLC work-stealing framework.
-// It is inspired by extensible scheduler concepts like sched_ext.
+//
+// Key safety principle: Policies control WHEN to steal (participation),
+// hardware controls WHAT to steal (work selection). This separation ensures
+// policies cannot violate CLC constraints or introduce correctness bugs.
 //
 
 #pragma once
@@ -13,57 +16,53 @@
 namespace clc_policy {
 
 // ============================================================================
-// 1. Scheduler Policy Interface Definition
+// 1. Safe Scheduler Policy Interface
 // ============================================================================
 
 /**
- * @brief Base template for a CLC Scheduler Policy.
+ * @brief Template-based CLC Scheduler Policy Interface
  *
- * A policy is a struct that provides a set of static callbacks (or "operations")
- * that the CLC work-stealing loop can invoke at key decision points.
+ * Policies provide 3 static callbacks that control block participation in
+ * work stealing. The CLC framework manages all hardware interactions and
+ * enforces safety constraints.
  *
- * This allows developers to implement custom logic for work selection,
- * preemption, and granularity without altering the core CLC framework.
+ * Safety guarantees:
+ * - Policy cannot submit requests after observing failure
+ * - Policy cannot decode block IDs on failure
+ * - Policy cannot violate CLC memory ordering or synchronization
+ * - Skipping steal attempts is always safe
  *
- * @tparam Policy The user-defined policy implementation.
- * @tparam SharedMem The type for the policy's shared memory struct.
+ * @tparam Policy The user-defined policy implementation
  */
-template<typename Policy, typename SharedMem>
+template<typename Policy>
 struct ClcSchedulerPolicy {
     /**
-     * @brief Callback to initialize the policy's shared memory.
-     * Invoked once per thread block at the start of the kernel.
+     * @brief Initialize policy state.
+     * Called once per thread block at kernel start, before any work stealing.
      */
-    __device__ static void init(SharedMem& smem) {
-        Policy::init(smem);
+    __device__ static void init() {
+        Policy::init();
     }
 
     /**
-     * @brief Callback to select the next work item for a thread block.
+     * @brief Decide whether to submit a steal request.
+     * Called BEFORE each steal attempt. Returning false safely skips the attempt.
      *
-     * This is the core of the policy. It's called when a block is ready for new
-     * work. The policy decides which work item ID to assign.
-     *
-     * @param smem The policy's shared memory.
-     * @param hardware_cta_id The block ID returned by the hardware work-stealing.
-     *                        This can be used or ignored by the policy.
-     * @return The ID of the next work item to be processed.
+     * @return true = submit steal request, false = skip (safe)
      */
-    __device__ static int select_work(SharedMem& smem, int hardware_cta_id) {
-        return Policy::select_work(smem, hardware_cta_id);
+    __device__ static bool should_try_steal() {
+        return Policy::should_try_steal();
     }
 
     /**
-     * @brief Callback to determine if a block should stop and yield.
+     * @brief Decide whether to continue after successful steal.
+     * Called AFTER a successful steal, with the stolen block ID.
      *
-     * Allows for implementing preemption. If this returns true, the work-stealing
-     * loop can be terminated, allowing the block to exit.
-     *
-     * @param smem The policy's shared memory.
-     * @return True if the block should preempt its work, false otherwise.
+     * @param stolen_bx The block ID that was stolen (validated by hardware)
+     * @return true = continue stealing, false = exit loop
      */
-    __device__ static bool should_preempt(SharedMem& smem) {
-        return Policy::should_preempt(smem);
+    __device__ static bool keep_going_after_success(int stolen_bx) {
+        return Policy::keep_going_after_success(stolen_bx);
     }
 };
 
@@ -73,135 +72,212 @@ struct ClcSchedulerPolicy {
 // ============================================================================
 
 // ----------------------------------------------------------------------------
-// Policy 1: DefaultGreedy (Baseline)
+// Policy 1: Greedy (Baseline)
 //
-// This policy mimics the default hardware behavior: a block that successfully
-// steals work immediately processes the work item corresponding to the stolen
-// block ID.
+// Always steal until hardware says no more work. Mimics default CLC behavior.
 // ----------------------------------------------------------------------------
 
-struct DefaultGreedyPolicy {
-    // This policy requires no special shared memory.
-    struct SharedMemory {};
-
-    __device__ static void init(SharedMemory& smem) {
-        // No-op
+struct GreedyPolicy {
+    __device__ static void init() {
+        // No state to initialize
     }
 
-    __device__ static int select_work(SharedMemory& smem, int hardware_cta_id) {
-        // Directly use the block ID provided by the hardware.
-        return hardware_cta_id;
+    __device__ static bool should_try_steal() {
+        return true;  // Always try to steal
     }
 
-    __device__ static bool should_preempt(SharedMemory& smem) {
-        // Never preempt.
-        return false;
+    __device__ static bool keep_going_after_success(int stolen_bx) {
+        return true;  // Always continue
     }
 };
 
 
 // ----------------------------------------------------------------------------
-// Policy 2: PriorityBased
+// Policy 2: MaxSteals
 //
-// This policy implements priority-based scheduling. It uses a software queue
-// stored in shared memory to manage work items. Blocks always pick the
-// highest-priority available work item, ignoring the ID from the hardware.
+// Stop after N successful steals. Useful for load balancing.
 // ----------------------------------------------------------------------------
 
-// A simple fixed-size priority queue for demonstrating the concept.
-// In a real implementation, this could be backed by global memory.
-#define PRIORITY_QUEUE_SIZE 256
+struct MaxStealsPolicy {
+    static constexpr int max_steals = 8;
 
-struct PriorityBasedPolicy {
-    struct WorkItem {
-        int id;
-        int priority; // Lower value = higher priority
-    };
+    // Helper to get per-block shared state
+    __device__ static int& get_steals_done() {
+        __shared__ int steals_done;
+        return steals_done;
+    }
 
-    struct SharedMemory {
-        WorkItem queue[PRIORITY_QUEUE_SIZE];
-        int queue_size;
-    };
-
-    __device__ static void init(SharedMemory& smem) {
-        // In a real scenario, this would be populated from global memory.
-        // For this example, we create a dummy queue.
+    __device__ static void init() {
         if (threadIdx.x == 0) {
-            smem.queue_size = PRIORITY_QUEUE_SIZE;
-            for (int i = 0; i < PRIORITY_QUEUE_SIZE; ++i) {
-                smem.queue[i].id = blockIdx.x * PRIORITY_QUEUE_SIZE + i;
-                // Assign higher priority to items at the end of the list
-                smem.queue[i].priority = PRIORITY_QUEUE_SIZE - i;
-            }
+            get_steals_done() = 0;
         }
         __syncthreads();
     }
 
-    __device__ static int select_work(SharedMemory& smem, int hardware_cta_id) {
-        // This policy ignores the hardware_cta_id and uses its own logic.
-        // It finds and claims the highest-priority item from the shared queue.
-        int best_priority = -1;
-        int best_idx = -1;
-        int work_id = -1;
-
-        // Find highest priority item (simplified for demo)
-        if (threadIdx.x == 0) {
-            for (int i = 0; i < smem.queue_size; ++i) {
-                if (smem.queue[i].priority > best_priority) {
-                    best_priority = smem.queue[i].priority;
-                    best_idx = i;
-                }
-            }
-
-            if (best_idx != -1) {
-                work_id = smem.queue[best_idx].id;
-                // Mark as taken by setting priority to -1
-                smem.queue[best_idx].priority = -1;
-            }
-        }
-
-        // Broadcast the chosen work ID to all threads in the block.
-        work_id = __shfl_sync(0xffffffff, work_id, 0);
-        return work_id;
+    __device__ static bool should_try_steal() {
+        return get_steals_done() < max_steals;
     }
 
-    __device__ static bool should_preempt(SharedMemory& smem) {
-        // Could check a global flag for high-priority preemption signal.
-        return false;
+    __device__ static bool keep_going_after_success(int stolen_bx) {
+        if (threadIdx.x == 0) {
+            atomicAdd(&get_steals_done(), 1);
+        }
+        __syncthreads();
+        return get_steals_done() < max_steals;
     }
 };
 
+
 // ----------------------------------------------------------------------------
-// Policy 3: LocalityAware
+// Policy 3: ThrottledStealing
 //
-// This policy attempts to schedule work that is "close" to the block's
-// physical location to improve cache reuse.
+// Only steal every Nth iteration. Reduces contention.
 // ----------------------------------------------------------------------------
 
-struct LocalityAwarePolicy {
-    struct SharedMemory {
-        int locality_group_id;
-    };
+struct ThrottledPolicy {
+    static constexpr int N = 2;  // Steal every 2nd iteration
 
-    __device__ static void init(SharedMemory& smem) {
-        // Determine a locality group based on the physical location of the block.
-        // This is a simplified example.
+    // Helper to get per-block shared state
+    __device__ static int& get_iteration() {
+        __shared__ int iteration;
+        return iteration;
+    }
+
+    __device__ static bool& get_result() {
+        __shared__ bool result;
+        return result;
+    }
+
+    __device__ static void init() {
         if (threadIdx.x == 0) {
-            smem.locality_group_id = blockIdx.x % 16; // Example: 16 groups
+            get_iteration() = 0;
         }
         __syncthreads();
     }
 
-    __device__ static int select_work(SharedMemory& smem, int hardware_cta_id) {
-        // A real implementation would check if `hardware_cta_id` belongs to the
-        // same locality group. If not, it might try to steal again or consult
-        // a work queue for a better match.
-        // For this example, we just return the hardware ID.
-        return hardware_cta_id;
+    __device__ static bool should_try_steal() {
+        if (threadIdx.x == 0) {
+            get_result() = (get_iteration() % N) == 0;
+            get_iteration()++;
+        }
+        __syncthreads();
+        return get_result();
     }
 
-    __device__ static bool should_preempt(SharedMemory& smem) {
-        return false;
+    __device__ static bool keep_going_after_success(int stolen_bx) {
+        return true;
+    }
+};
+
+
+// ----------------------------------------------------------------------------
+// Policy 4: SelectiveBlocks
+//
+// Only certain blocks steal aggressively (e.g., first half).
+// ----------------------------------------------------------------------------
+
+struct SelectiveBlocksPolicy {
+    __device__ static void init() {
+        // No state to initialize
+    }
+
+    __device__ static bool should_try_steal() {
+        // Only first half of blocks steal
+        return blockIdx.x < (gridDim.x / 2);
+    }
+
+    __device__ static bool keep_going_after_success(int stolen_bx) {
+        return blockIdx.x < (gridDim.x / 2);
+    }
+};
+
+
+// ----------------------------------------------------------------------------
+// Policy Composition: AND combinator
+//
+// Combine multiple policies - both must agree to steal.
+// ----------------------------------------------------------------------------
+
+template<typename P1, typename P2>
+struct AndPolicy {
+    __device__ static void init() {
+        P1::init();
+        P2::init();
+    }
+
+    __device__ static bool should_try_steal() {
+        return P1::should_try_steal() && P2::should_try_steal();
+    }
+
+    __device__ static bool keep_going_after_success(int stolen_bx) {
+        return P1::keep_going_after_success(stolen_bx) &&
+               P2::keep_going_after_success(stolen_bx);
+    }
+};
+
+// Example: First half of blocks + max 8 steals each
+using SelectiveThrottled = AndPolicy<SelectiveBlocksPolicy, MaxStealsPolicy>;
+
+
+// ----------------------------------------------------------------------------
+// Policy 5: Voting Policy
+//
+// Warps vote on whether to attempt a steal. A steal is only tried if a
+// threshold of warps agree. This demonstrates intra-block consensus.
+// ----------------------------------------------------------------------------
+
+struct VotingPolicy {
+    // Threshold: at least half the warps must vote to steal.
+    // Note: In a real scenario, this could be tuned.
+    __device__ static int get_threshold() {
+        return (blockDim.x + 31) / 32 / 2;
+    }
+
+    // Shared memory for votes and the final decision.
+    __device__ static int& get_vote_count() {
+        __shared__ int vote_count;
+        return vote_count;
+    }
+    __device__ static bool& get_decision() {
+        __shared__ bool decision;
+        return decision;
+    }
+
+    __device__ static void init() {
+        if (threadIdx.x == 0) {
+            get_vote_count() = 0;
+        }
+        __syncthreads();
+    }
+
+    __device__ static bool should_try_steal() {
+        // 1. Each warp leader casts a vote.
+        //    For this example, we'll use a simple probabilistic vote.
+        //    A real policy could base this on workload progress, etc.
+        if ((threadIdx.x % 32) == 0) {
+            // Simple probabilistic vote: 75% chance to vote 'yes'
+            if ((clock() & 0xFF) > 64) {
+                atomicAdd(&get_vote_count(), 1);
+            }
+        }
+        __syncthreads();
+
+        // 2. Thread 0 checks if the threshold is met and makes a decision.
+        if (threadIdx.x == 0) {
+            get_decision() = (get_vote_count() >= get_threshold());
+            get_vote_count() = 0; // Reset for next iteration
+        }
+        __syncthreads();
+
+        // 3. All threads return the collective decision.
+        return get_decision();
+    }
+
+    __device__ static bool keep_going_after_success(int stolen_bx) {
+        // For simplicity, we always continue after a successful steal.
+        // A more complex policy could change its voting behavior based on
+        // which block was stolen.
+        return true;
     }
 };
 
