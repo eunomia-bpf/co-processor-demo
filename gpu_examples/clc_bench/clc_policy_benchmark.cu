@@ -1,162 +1,17 @@
 // CLC Policy Benchmark: Demonstrating and Comparing Scheduler Policies
-// Based on the interface defined in clc_scheduler_policy.cuh
+// Compares basic and specialized policies against fixed-work baselines
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <cuda_runtime.h>
-#include <cuda/ptx>
-#include <cooperative_groups.h>
 #include "ai_workloads.cuh"
-#include "clc_scheduler_policy.cuh"
+#include "clc_policy_framework.cuh"
+#include "clc_policies.cuh"
 #include "benchmark_kernels.cuh"
 
-namespace cg = cooperative_groups;
-namespace ptx = cuda::ptx;
 using namespace clc_policy;
 
-// ============================================
-// Policy-Aware CLC Kernel
-// ============================================
-
-template<typename WorkloadType, typename Policy>
-__global__ void kernel_cluster_launch_control_policy(float* data, int n, int* block_count, int* steal_count,
-                                                     int prologue_complexity) {
-    __shared__ uint4 result;
-    __shared__ uint64_t bar;
-    int phase = 0;
-
-    // Framework holds policy state in __shared__ memory
-    __shared__ typename Policy::State policy_state;
-    __shared__ int go;  // Broadcast flag for uniform control flow
-
-    // Initialize the scheduler policy (thread 0 only, then sync)
-    if (threadIdx.x == 0) {
-        Policy::init(policy_state);
-    }
-    __syncthreads();
-
-    if (cg::thread_block::thread_rank() == 0)
-        ptx::mbarrier_init(&bar, 1);
-
-    float weight = compute_prologue(prologue_complexity);
-    int bx = blockIdx.x;
-
-    while (true) {
-        __syncthreads();
-
-        // ELECT-AND-BROADCAST PATTERN: Thread 0 evaluates policy
-        if (threadIdx.x == 0) {
-            go = Policy::should_try_steal(policy_state) ? 1 : 0;
-        }
-        __syncthreads();
-
-        // All threads read the same decision and take the same path
-        if (!go) {
-            break;  // Uniform exit - policy decided to stop
-        }
-
-        if (cg::thread_block::thread_rank() == 0) {
-            ptx::fence_proxy_async_generic_sync_restrict(ptx::sem_acquire, ptx::space_cluster, ptx::scope_cluster);
-            cg::invoke_one(cg::coalesced_threads(), [&](){
-                ptx::clusterlaunchcontrol_try_cancel(&result, &bar);
-            });
-            ptx::mbarrier_arrive_expect_tx(ptx::sem_relaxed, ptx::scope_cta, ptx::space_shared, &bar, sizeof(uint4));
-        }
-
-        int i = bx * blockDim.x + threadIdx.x;
-        if (i < n) {
-            process_workload(WorkloadType{}, data, i, n, weight);
-        }
-
-        while (!ptx::mbarrier_try_wait_parity(ptx::sem_acquire, ptx::scope_cta, &bar, phase)) {}
-        phase ^= 1;
-
-        bool success = ptx::clusterlaunchcontrol_query_cancel_is_canceled(result);
-        if (!success) {
-            break;  // CLC failure - must exit immediately (no policy check)
-        }
-
-        bx = ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x<int>(result);
-
-        if (threadIdx.x == 0) {
-            atomicAdd(steal_count, 1);
-        }
-
-        ptx::fence_proxy_async_generic_sync_restrict(ptx::sem_release, ptx::space_shared, ptx::scope_cluster);
-
-        // ELECT-AND-BROADCAST PATTERN: Thread 0 evaluates policy after success
-        if (threadIdx.x == 0) {
-            go = Policy::keep_going_after_success(bx, policy_state) ? 1 : 0;
-        }
-        __syncthreads();
-
-        // All threads read the same decision and take the same path
-        if (!go) {
-            break;  // Uniform exit - policy decided to stop
-        }
-    }
-
-    if (threadIdx.x == 0) {
-        atomicAdd(block_count, 1);
-    }
-}
-
-// ============================================
-// Benchmark Runner
-// ============================================
-
-template<typename WorkloadType, typename Policy>
-BenchmarkResult run_clc_policy(float* d_data, int n, int blocks, int threads,
-                               float* h_original, int prologue, int warmup, int runs) {
-    int *d_block_count, *d_steal_count;
-    cudaMalloc(&d_block_count, sizeof(int));
-    cudaMalloc(&d_steal_count, sizeof(int));
-
-    // Warmup
-    for (int i = 0; i < warmup; i++) {
-        cudaMemcpy(d_data, h_original, n * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemset(d_block_count, 0, sizeof(int));
-        cudaMemset(d_steal_count, 0, sizeof(int));
-        kernel_cluster_launch_control_policy<WorkloadType, Policy><<<blocks, threads>>>(d_data, n, d_block_count, d_steal_count, prologue);
-        cudaDeviceSynchronize();
-    }
-
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-
-    float total_time = 0.0f, total_blocks = 0.0f, total_steals = 0.0f;
-
-    for (int i = 0; i < runs; i++) {
-        cudaMemcpy(d_data, h_original, n * sizeof(float), cudaMemcpyHostToDevice);
-        cudaMemset(d_block_count, 0, sizeof(int));
-        cudaMemset(d_steal_count, 0, sizeof(int));
-
-        cudaEventRecord(start);
-        kernel_cluster_launch_control_policy<WorkloadType, Policy><<<blocks, threads>>>(d_data, n, d_block_count, d_steal_count, prologue);
-        cudaEventRecord(stop);
-        cudaEventSynchronize(stop);
-
-        float ms = 0;
-        cudaEventElapsedTime(&ms, start, stop);
-        total_time += ms;
-
-        int h_blocks, h_steals;
-        cudaMemcpy(&h_blocks, d_block_count, sizeof(int), cudaMemcpyDeviceToHost);
-        cudaMemcpy(&h_steals, d_steal_count, sizeof(int), cudaMemcpyDeviceToHost);
-        total_blocks += h_blocks;
-        total_steals += h_steals;
-    }
-
-    BenchmarkResult result = {total_time / runs, total_blocks / runs, total_steals / runs};
-    
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
-    cudaFree(d_block_count);
-    cudaFree(d_steal_count);
-
-    return result;
-}
+// Kernel and runner now provided by clc_policy_framework.cuh
 
 template<typename WorkloadType>
 void run_scenario(const char* scenario, int prologue,
