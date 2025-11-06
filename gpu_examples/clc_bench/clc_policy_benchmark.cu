@@ -209,9 +209,20 @@ int main(int argc, char** argv) {
     // Parse arguments
     int n = 1024 * 1024;  // Default: 1M elements
     int threads = 256;
+    float imb_scale = 1.0f;  // Default: no scaling
+    float work_scale = 1.0f; // Default: no scaling
 
     if (argc > 1) n = atoi(argv[1]);
     if (argc > 2) threads = atoi(argv[2]);
+    if (argc > 3) imb_scale = atof(argv[3]);
+    if (argc > 4) work_scale = atof(argv[4]);
+
+    // Set workload scale factors in device constant memory
+    cudaMemcpyToSymbol(imbalance_scale, &imb_scale, sizeof(float));
+    cudaMemcpyToSymbol(workload_scale, &work_scale, sizeof(float));
+
+    fprintf(stderr, "# Config: n=%d, threads=%d, imbalance_scale=%.2f, workload_scale=%.2f\n",
+           n, threads, imb_scale, work_scale);
 
     // Allocate data
     float *h_data = (float*)malloc(n * sizeof(float));

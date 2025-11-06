@@ -1,11 +1,19 @@
 // AI Workload Functions Header
 // Real-world AI inference workload simulations
 // Each function represents a specific AI scenario
+//
+// TUNABLE PARAMETERS (passed at runtime via device constant memory):
+// - imbalance_scale: Scale imbalance factor (default 1.0, higher = more imbalance)
+// - workload_scale: Scale overall workload (default 1.0, higher = more work)
 
 #ifndef AI_WORKLOADS_CUH
 #define AI_WORKLOADS_CUH
 
 #include <cuda_runtime.h>
+
+// Device constant memory for runtime-configurable parameters
+__constant__ float imbalance_scale = 1.0f;
+__constant__ float workload_scale = 1.0f;
 
 // ============================================
 // Workload Type Tags (for template dispatch)
@@ -42,11 +50,17 @@ __device__ inline float compute_prologue(int prologue_complexity) {
 
 __device__ inline void process_workload(NLPVariableSequence, float* data, int idx, int n, float weight) {
     // Sequence length varies: some sequences are short, some are long
-    int seq_length;
-    if (idx % 16 == 0) seq_length = 512;      // 6.25% long sequences
-    else if (idx % 8 == 0) seq_length = 256;  // 12.5% medium sequences
-    else if (idx % 4 == 0) seq_length = 128;  // 25% medium-short
-    else seq_length = 64;                      // 56.25% short sequences
+    int base_seq_length;
+    if (idx % 16 == 0) base_seq_length = 512;      // 6.25% long sequences
+    else if (idx % 8 == 0) base_seq_length = 256;  // 12.5% medium sequences
+    else if (idx % 4 == 0) base_seq_length = 128;  // 25% medium-short
+    else base_seq_length = 64;                      // 56.25% short sequences
+
+    // Apply scaling factors
+    // imbalance_scale: scales the difference between long and short sequences
+    // workload_scale: scales overall work
+    float imb_factor = (base_seq_length - 64.0f) * imbalance_scale + 64.0f;
+    int seq_length = (int)(imb_factor * workload_scale);
 
     float value = data[idx];
     // Simulate attention computation over sequence

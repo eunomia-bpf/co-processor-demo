@@ -70,10 +70,11 @@ struct ClcSchedulerPolicy {
      * CRITICAL: This is called by thread 0 only. Framework broadcasts result.
      *
      * @param s Policy state (held by framework in __shared__ memory)
+     * @param current_block Current block ID being processed
      * @return true = submit steal request, false = exit loop
      */
-    __device__ static bool should_try_steal(State& s) {
-        return Policy::should_try_steal(s);
+    __device__ static bool should_try_steal(State& s, int current_block) {
+        return Policy::should_try_steal(s, current_block);
     }
 };
 
@@ -99,8 +100,8 @@ struct AndPolicy {
         P2::init(s.s2);
     }
 
-    __device__ static bool should_try_steal(State& s) {
-        return P1::should_try_steal(s.s1) && P2::should_try_steal(s.s2);
+    __device__ static bool should_try_steal(State& s, int current_block) {
+        return P1::should_try_steal(s.s1, current_block) && P2::should_try_steal(s.s2, current_block);
     }
 };
 
@@ -153,7 +154,7 @@ __global__ void kernel_cluster_launch_control_policy(
 
         // ELECT-AND-BROADCAST PATTERN: Thread 0 evaluates policy
         if (threadIdx.x == 0) {
-            go = Policy::should_try_steal(policy_state) ? 1 : 0;
+            go = Policy::should_try_steal(policy_state, bx) ? 1 : 0;
         }
         __syncthreads();
 

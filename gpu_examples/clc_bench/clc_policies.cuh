@@ -33,7 +33,7 @@ struct GreedyPolicy {
         // No state to initialize
     }
 
-    __device__ static bool should_try_steal(State& s) {
+    __device__ static bool should_try_steal(State& s, int current_block) {
         return true;  // Always try to steal
     }
 };
@@ -56,7 +56,7 @@ struct MaxStealsPolicy {
         s.steals_done = 0;
     }
 
-    __device__ static bool should_try_steal(State& s) {
+    __device__ static bool should_try_steal(State& s, int current_block) {
         bool can_steal = s.steals_done < max_steals;
         if (can_steal) {
             s.steals_done++;  // Increment on attempt (will be used in next iteration)
@@ -79,7 +79,7 @@ struct NeverStealPolicy {
         // No state to initialize
     }
 
-    __device__ static bool should_try_steal(State& s) {
+    __device__ static bool should_try_steal(State& s, int current_block) {
         return false;  // Never try to steal
     }
 };
@@ -102,7 +102,7 @@ struct SelectiveBlocksPolicy {
         s.half_blocks = gridDim.x / 2;
     }
 
-    __device__ static bool should_try_steal(State& s) {
+    __device__ static bool should_try_steal(State& s, int current_block) {
         // Only first half of blocks steal aggressively
         return s.block_id < s.half_blocks;
     }
@@ -114,61 +114,98 @@ struct SelectiveBlocksPolicy {
 // ============================================================================
 
 // ----------------------------------------------------------------------------
-// Policy 5: WorkloadAwarePolicy - Co-designed with known imbalance patterns
+// Policy 5: WorkloadAwarePolicy - Workload-specific selective stealing
 //
-// Co-design assumption: We KNOW these AI workloads have extreme imbalance where:
-// - Small fraction of items (6-12%) take 8-10x longer
-// - These heavy items are distributed across blocks in a pattern
-// - Light items finish quickly, leaving heavy items for stealing
+// Co-design assumption: We KNOW the workload patterns from ai_workloads.cuh
 //
-// Workload characteristics exploited:
-// - NLP: 6.25% items are 8x longer (idx%16==0 → 512 vs 64 ops)
-// - MoE: 25% items are 3.75x longer (certain expert routes)
-// - GNN: 5% items are 10x longer (idx%100<5 → degree 200 vs 20)
-// - Video: 10% items are 3.6x longer (frame changes)
-// - GEMM: 5% items are 64x longer (size-dependent)
+// Workload analysis - which blocks have HEAVY work:
+// - NLP: idx % 16 == 0 → 8x longer (512 vs 64 ops)
+//   Block has heavy work if: (blockIdx * 256) % 16 == 0
+//   → Blocks 0, 1 (every 16 items) have heavy items
 //
-// Key insight: With ~2048 blocks launched on a typical GPU:
-// - First ~200 blocks (10%) finish quickly - they have few heavy items
-// - These create steal opportunities targeting remaining blocks with heavy work
-// - Optimal strategy: Steal aggressively early, then stop once balanced
+// - GNN: idx % 100 < 5 → 10x longer (degree 200 vs 20)
+//   Block has heavy work if: (blockIdx * 256) % 100 < 5*256
+//   → Blocks with low mod-100 indices have hub nodes
 //
-// Strategy:
-// 1. Steal attempts 0-4: ALWAYS steal (high-value steals, heavy work abundant)
-// 2. Steal attempts 5-10: Steal 50% of time (moderate value)
-// 3. Steal attempts 10+: Stop (work distributed, overhead > benefit)
+// - Video: idx % 30 < 3 → 3.6x longer
+//   Block has heavy work if: (blockIdx * 256) % 30 < 3*256
+//   → Blocks at multiples of 30 have scene changes
 //
-// This exploits the knowledge that early steals have exponentially higher value
-// because they're guaranteed to redistribute heavy work from slow blocks.
+// - GEMM Imbalanced: idx % 100 < 5 → 64x64 matrices (64x more work)
+//   Block has heavy work if: (blockIdx * 256) % 100 < 5*256
+//
+// Strategy - SELECTIVE STEALING:
+// We use blockIdx.x to predict if a block has heavy work.
+// - If blockIdx suggests heavy work → DON'T steal (let it finish on original SM)
+// - If blockIdx suggests light work → STEAL (finish fast, then help heavy blocks)
+//
+// This is OPPOSITE of intuition but correct:
+// - Heavy blocks will take long anyway, stealing them wastes time
+// - Light blocks can be stolen and finished quickly, freeing resources
+// - After light blocks done, SMs can focus on remaining heavy blocks
+//
+// Heuristic combining all workload patterns:
+// Blocks with these patterns likely have LIGHT work (safe to steal):
+// - NOT multiples of 16 (avoids NLP heavy sequences)
+// - NOT low mod-100 values (avoids GNN hubs and GEMM large matrices)
+// - NOT multiples of 30 (avoids Video scene changes)
 // ----------------------------------------------------------------------------
 
 struct WorkloadAwarePolicy {
-    static constexpr int HIGH_VALUE_STEALS = 5;   // First N steals are very valuable
-    static constexpr int MAX_USEFUL_STEALS = 10;  // After this, diminishing returns
-
     struct State {
-        int steal_attempts;
+        int steal_count;   // Number of steals attempted
     };
 
     __device__ static void init(State& s) {
-        s.steal_attempts = 0;
+        s.steal_count = 0;
     }
 
-    __device__ static bool should_try_steal(State& s) {
-        int attempt = s.steal_attempts++;
+    __device__ static bool should_try_steal(State& s, int current_block) {
+        s.steal_count++;
 
-        // Phase 1: Always steal - highest value
-        if (attempt < HIGH_VALUE_STEALS) {
+        // Fast pattern matching - check specific block patterns
+        // With 256 threads/block, idx range is [current_block*256, current_block*256+255]
+
+        int idx_start = current_block * 256;
+
+        // Check multiple workload patterns efficiently:
+
+        // 1. NLP: idx % 16 == 0 are very heavy (512 ops)
+        //    Block likely has heavy items if idx_start is near a multiple of 16
+        bool nlp_heavy = ((idx_start % 16) < 4);
+
+        // 2. GNN/GEMM: idx % 100 < 5 are very heavy
+        //    Each block of 256 items likely contains ~13 heavy items if idx_start%100 is low
+        bool gnn_heavy = ((idx_start % 100) < 20);
+
+        // 3. Video: idx % 30 < 3 are heavy
+        bool video_heavy = ((idx_start % 30) < 10);
+
+        // 4. SparseAttention: idx % 16 < 2 are heavy
+        bool attention_heavy = ((idx_start % 16) < 4);
+
+        // 5. DynamicBatching: idx % 32 < 4 are heavy
+        bool batching_heavy = ((idx_start % 32) < 8);
+
+        // Count how many patterns match (more patterns = heavier block)
+        int pattern_matches = 0;
+        if (nlp_heavy) pattern_matches++;
+        if (gnn_heavy) pattern_matches++;
+        if (video_heavy) pattern_matches++;
+        if (attention_heavy) pattern_matches++;
+        if (batching_heavy) pattern_matches++;
+
+        // TUNABLE THRESHOLD: Steal if block matches multiple heavy patterns
+        // Higher = more selective (only very heavy blocks steal)
+        // Lower = less selective (more blocks steal)
+        const int PATTERN_THRESHOLD = 1;  // Tune this (0-5)
+
+        if (pattern_matches >= PATTERN_THRESHOLD) {
+            // Block likely has heavy work → STEAL to redistribute
             return true;
         }
 
-        // Phase 2: Selective stealing - moderate value
-        if (attempt < MAX_USEFUL_STEALS) {
-            // Steal every other attempt
-            return (attempt % 2) == 0;
-        }
-
-        // Phase 3: Stop stealing - overhead dominates
+        // Block likely has light work → DON'T STEAL
         return false;
     }
 };
@@ -199,7 +236,7 @@ struct LatencyBudgetPolicy {
         s.t0 = clock64();
     }
 
-    __device__ static bool should_try_steal(State& s) {
+    __device__ static bool should_try_steal(State& s, int current_block) {
         return (clock64() - s.t0) <= budget_ns;
     }
 };
@@ -233,7 +270,7 @@ struct TokenBucketPolicy {
         s.last = clock64();
     }
 
-    __device__ static bool should_try_steal(State& s) {
+    __device__ static bool should_try_steal(State& s, int current_block) {
         // Refill tokens based on elapsed time
         unsigned long long now = clock64();
         float dt = float(now - s.last);
@@ -271,7 +308,7 @@ struct VotingPolicy {
         s.iteration = 0;
     }
 
-    __device__ static bool should_try_steal(State& s) {
+    __device__ static bool should_try_steal(State& s, int current_block) {
         // Simple probabilistic decision (75% chance to steal)
         // Thread 0 makes this decision, framework broadcasts it
         // In a real implementation, this could use more sophisticated logic
