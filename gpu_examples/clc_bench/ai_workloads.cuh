@@ -25,6 +25,8 @@ struct SparseAttention {};
 struct GraphNeuralNetwork {};
 struct MixtureOfExperts {};
 struct VideoProcessing {};
+struct ClusteredHeavy {};
+struct DataDependentImbalance {};
 
 // GEMM workload tags
 struct GEMMBalanced {};
@@ -77,11 +79,15 @@ __device__ inline void process_workload(NLPVariableSequence, float* data, int id
 
 __device__ inline void process_workload(DynamicBatching, float* data, int idx, int n, float weight) {
     // Simulate variable model complexity per request
-    int model_ops;
+    int base_model_ops;
     int request_id = idx % 32;
-    if (request_id < 4) model_ops = 200;      // 12.5% complex requests
-    else if (request_id < 12) model_ops = 100; // 25% medium requests
-    else model_ops = 50;                       // 62.5% simple requests
+    if (request_id < 4) base_model_ops = 200;      // 12.5% complex requests
+    else if (request_id < 12) base_model_ops = 100; // 25% medium requests
+    else base_model_ops = 50;                       // 62.5% simple requests
+
+    // Apply scaling factors
+    float imb_factor = (base_model_ops - 50.0f) * imbalance_scale + 50.0f;
+    int model_ops = (int)(imb_factor * workload_scale);
 
     float value = data[idx];
     for (int i = 0; i < model_ops; i++) {
@@ -101,18 +107,22 @@ __device__ inline void process_workload(SparseAttention, float* data, int idx, i
 
     // Sparse attention pattern: attend to subset of tokens
     int attention_mask = idx % 16;
-    int attend_count;
+    int base_attend_count;
 
     if (attention_mask < 2) {
         // 12.5%: Full attention (attend to many tokens)
-        attend_count = 128;
+        base_attend_count = 128;
     } else if (attention_mask < 6) {
         // 25%: Medium attention
-        attend_count = 64;
+        base_attend_count = 64;
     } else {
         // 62.5%: Local attention only
-        attend_count = 32;
+        base_attend_count = 32;
     }
+
+    // Apply scaling factors
+    float imb_factor = (base_attend_count - 32.0f) * imbalance_scale + 32.0f;
+    int attend_count = (int)(imb_factor * workload_scale);
 
     // Compute attention scores
     for (int i = 0; i < attend_count; i++) {
@@ -131,22 +141,26 @@ __device__ inline void process_workload(GraphNeuralNetwork, float* data, int idx
     float value = data[idx];
 
     // Node degree varies significantly in real graphs (power law distribution)
-    int degree;
+    int base_degree;
     int node_type = idx % 100;
 
     if (node_type < 5) {
         // 5%: Hub nodes with many neighbors
-        degree = 200;
+        base_degree = 200;
     } else if (node_type < 20) {
         // 15%: Well-connected nodes
-        degree = 100;
+        base_degree = 100;
     } else if (node_type < 50) {
         // 30%: Moderately connected
-        degree = 50;
+        base_degree = 50;
     } else {
         // 50%: Sparse connections
-        degree = 20;
+        base_degree = 20;
     }
+
+    // Apply scaling factors
+    float imb_factor = (base_degree - 20.0f) * imbalance_scale + 20.0f;
+    int degree = (int)(imb_factor * workload_scale);
 
     // Message passing: aggregate from neighbors
     for (int i = 0; i < degree; i++) {
@@ -168,17 +182,21 @@ __device__ inline void process_workload(MixtureOfExperts, float* data, int idx, 
     int expert_route = (int)(value * 1000.0f) % 8;
 
     // Different experts have different complexity
-    int expert_ops;
+    int base_expert_ops;
     if (expert_route == 0 || expert_route == 7) {
         // 25%: Complex experts
-        expert_ops = 150;
+        base_expert_ops = 150;
     } else if (expert_route < 4) {
         // 50%: Medium experts
-        expert_ops = 80;
+        base_expert_ops = 80;
     } else {
         // 25%: Simple experts
-        expert_ops = 40;
+        base_expert_ops = 40;
     }
+
+    // Apply scaling factors
+    float imb_factor = (base_expert_ops - 40.0f) * imbalance_scale + 40.0f;
+    int expert_ops = (int)(imb_factor * workload_scale);
 
     // Expert computation
     for (int i = 0; i < expert_ops; i++) {
@@ -197,23 +215,109 @@ __device__ inline void process_workload(VideoProcessing, float* data, int idx, i
 
     // Frame complexity varies: static backgrounds vs motion
     int frame_id = idx % 30; // 30 fps
-    int ops;
+    int base_ops;
 
     if (frame_id < 3) {
         // 10%: Scene changes (high complexity)
-        ops = 180;
+        base_ops = 180;
     } else if (frame_id % 5 == 0) {
         // 20%: Moderate motion
-        ops = 100;
+        base_ops = 100;
     } else {
         // 70%: Static/low motion
-        ops = 50;
+        base_ops = 50;
     }
+
+    // Apply scaling factors
+    float imb_factor = (base_ops - 50.0f) * imbalance_scale + 50.0f;
+    int ops = (int)(imb_factor * workload_scale);
 
     // Image processing pipeline
     for (int i = 0; i < ops; i++) {
         value = value * weight + 0.1f * expf(-fabsf(value) * 0.01f);
     }
+    data[idx] = value;
+}
+
+// ============================================
+// Workload 7: Clustered Heavy Workload
+// Creates pathological case for greedy stealing:
+// - Light blocks (95%) finish early and flood steal queue
+// - Heavy blocks (5%) are clustered and need to steal from each other
+// - Greedy's random stealing causes steal queue congestion
+// ============================================
+
+__device__ inline void process_workload(ClusteredHeavy, float* data, int idx, int n, float weight) {
+    float value = data[idx];
+
+    // Determine which block this item belongs to (assuming 256 threads/block)
+    int block_id = idx / 256;
+    int total_blocks = (n + 255) / 256;
+
+    // Calculate heavy cluster threshold based on imbalance_scale
+    // imbalance_scale=1.0 -> 5% heavy (last 5% of blocks)
+    // imbalance_scale=2.0 -> 10% heavy (last 10% of blocks)
+    // imbalance_scale=3.0 -> 15% heavy (last 15% of blocks)
+    float heavy_ratio = 0.05f * imbalance_scale;
+    int cluster_start = (int)(total_blocks * (1.0f - heavy_ratio));
+
+    int ops;
+    if (block_id >= cluster_start) {
+        // Heavy cluster: 100-300x more work (scales with imbalance_scale)
+        // imbalance_scale=1.0 -> 100x work
+        // imbalance_scale=2.0 -> 200x work
+        // imbalance_scale=3.0 -> 300x work
+        ops = (int)(1000.0f * imbalance_scale * 100.0f * workload_scale);
+    } else {
+        // Light blocks: baseline work
+        ops = (int)(1000.0f * workload_scale);
+    }
+
+    // Compute-intensive operations to simulate work
+    for (int i = 0; i < ops; i++) {
+        value = tanhf(value * weight + 0.001f * sinf((float)i));
+    }
+
+    data[idx] = value;
+}
+
+// ============================================
+// Workload 8: Data-Dependent Imbalance
+// Work amount depends on DATA VALUE, not index
+// This prevents compiler from optimizing statically
+// KEY: Greedy doesn't know which items are heavy
+// Smart policy can detect and adapt
+// ============================================
+
+__device__ inline void process_workload(DataDependentImbalance, float* data, int idx, int n, float weight) {
+    float value = data[idx];
+
+    // Work amount depends on data value (hash-like function)
+    // This creates unpredictable imbalance that compiler can't optimize
+    unsigned int hash = __float_as_uint(value);
+    hash = hash ^ (hash >> 16);
+    hash = hash * 0x85ebca6b;
+    hash = hash ^ (hash >> 13);
+    hash = hash * 0xc2b2ae35;
+    hash = hash ^ (hash >> 16);
+
+    // Create bimodal distribution based on hash
+    // ~10% of items get heavy work, rest get light work
+    // But which items are heavy is DATA-DEPENDENT
+    int ops;
+    if ((hash % 100) < 10) {
+        // Heavy work: 10% of items
+        ops = (int)(10000.0f * imbalance_scale * workload_scale);
+    } else {
+        // Light work: 90% of items
+        ops = (int)(100.0f * workload_scale);
+    }
+
+    // Compute-intensive operations
+    for (int i = 0; i < ops; i++) {
+        value = tanhf(value * weight + 0.001f * sinf((float)i));
+    }
+
     data[idx] = value;
 }
 
@@ -246,6 +350,14 @@ template<> __host__ const char* get_workload_name<MixtureOfExperts>() {
 
 template<> __host__ const char* get_workload_name<VideoProcessing>() {
     return "CV: Video Frame Processing";
+}
+
+template<> __host__ const char* get_workload_name<ClusteredHeavy>() {
+    return "Clustered Heavy Workload (Tail Latency)";
+}
+
+template<> __host__ const char* get_workload_name<DataDependentImbalance>() {
+    return "Data-Dependent Imbalance (Hash-based)";
 }
 
 template<> __host__ const char* get_workload_name<GEMMBalanced>() {

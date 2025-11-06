@@ -31,6 +31,7 @@ struct ComprehensiveResult {
     BenchmarkResult latency_budget;
     BenchmarkResult token_bucket;
     BenchmarkResult voting;
+    BenchmarkResult cluster_aware;
 };
 
 // ============================================================================
@@ -64,6 +65,7 @@ ComprehensiveResult run_comprehensive(const char* scenario, int prologue,
     result.latency_budget = run_clc_policy<WorkloadType, LatencyBudgetPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
     result.token_bucket = run_clc_policy<WorkloadType, TokenBucketPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
     result.voting = run_clc_policy<WorkloadType, VotingPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
+    result.cluster_aware = run_clc_policy<WorkloadType, ClusterAwarePolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
 
     return result;
 }
@@ -136,12 +138,12 @@ void run_specialized(const char* workload_name, const char* use_case, const char
 // ============================================================================
 
 void print_table_header() {
-    printf("Workload,Prologue,FixedWork_ms,FixedBlocks_ms,CLCBaseline_ms,Greedy_ms,MaxSteals_ms,NeverSteal_ms,Selective_ms,WorkloadAware_ms,LatencyBudget_ms,TokenBucket_ms,Voting_ms,");
-    printf("CLCBaseline_steals,Greedy_steals,MaxSteals_steals,NeverSteal_steals,Selective_steals,WorkloadAware_steals,LatencyBudget_steals,TokenBucket_steals,Voting_steals\n");
+    printf("Workload,Prologue,FixedWork_ms,FixedBlocks_ms,CLCBaseline_ms,Greedy_ms,MaxSteals_ms,NeverSteal_ms,Selective_ms,WorkloadAware_ms,LatencyBudget_ms,TokenBucket_ms,Voting_ms,ClusterAware_ms,");
+    printf("CLCBaseline_steals,Greedy_steals,MaxSteals_steals,NeverSteal_steals,Selective_steals,WorkloadAware_steals,LatencyBudget_steals,TokenBucket_steals,Voting_steals,ClusterAware_steals\n");
 }
 
 void print_table_row_time(const ComprehensiveResult& r) {
-    printf("%s,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,",
+    printf("%s,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,",
            r.workload_name, r.prologue,
            r.fixed_work.avg_time_ms,
            r.fixed_blocks.avg_time_ms,
@@ -153,8 +155,9 @@ void print_table_row_time(const ComprehensiveResult& r) {
            r.probe_everyn.avg_time_ms,
            r.latency_budget.avg_time_ms,
            r.token_bucket.avg_time_ms,
-           r.voting.avg_time_ms);
-    printf("%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f\n",
+           r.voting.avg_time_ms,
+           r.cluster_aware.avg_time_ms);
+    printf("%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f\n",
            r.clc_baseline.avg_steals,
            r.greedy.avg_steals,
            r.maxsteals.avg_steals,
@@ -163,7 +166,8 @@ void print_table_row_time(const ComprehensiveResult& r) {
            r.probe_everyn.avg_steals,
            r.latency_budget.avg_steals,
            r.token_bucket.avg_steals,
-           r.voting.avg_steals);
+           r.voting.avg_steals,
+           r.cluster_aware.avg_steals);
 }
 
 void print_table_row_steals(const ComprehensiveResult& r) {
@@ -173,10 +177,10 @@ void print_table_row_steals(const ComprehensiveResult& r) {
 void print_speedup_analysis(const std::vector<ComprehensiveResult>& results) {
     // Print speedup analysis as CSV
     printf("\n");
-    printf("Workload,Greedy_speedup,MaxSteals_speedup,NeverSteal_speedup,Selective_speedup,WorkloadAware_speedup,LatencyBudget_speedup,TokenBucket_speedup,Voting_speedup,FixedWork_speedup,FixedBlocks_speedup\n");
+    printf("Workload,Greedy_speedup,MaxSteals_speedup,NeverSteal_speedup,Selective_speedup,WorkloadAware_speedup,LatencyBudget_speedup,TokenBucket_speedup,Voting_speedup,ClusterAware_speedup,FixedWork_speedup,FixedBlocks_speedup\n");
     for (const auto& r : results) {
         float base = r.clc_baseline.avg_time_ms;
-        printf("%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+        printf("%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
                r.workload_name,
                ((base - r.greedy.avg_time_ms) / base) * 100.0f,
                ((base - r.maxsteals.avg_time_ms) / base) * 100.0f,
@@ -186,6 +190,7 @@ void print_speedup_analysis(const std::vector<ComprehensiveResult>& results) {
                ((base - r.latency_budget.avg_time_ms) / base) * 100.0f,
                ((base - r.token_bucket.avg_time_ms) / base) * 100.0f,
                ((base - r.voting.avg_time_ms) / base) * 100.0f,
+               ((base - r.cluster_aware.avg_time_ms) / base) * 100.0f,
                ((base - r.fixed_work.avg_time_ms) / base) * 100.0f,
                ((base - r.fixed_blocks.avg_time_ms) / base) * 100.0f);
     }
@@ -234,7 +239,12 @@ int main(int argc, char** argv) {
     // Run all comprehensive benchmarks
     std::vector<ComprehensiveResult> results;
 
+    // NEW: ClusteredHeavy workload - designed to show 20%+ policy improvement
+    fprintf(stderr, "# Running ClusteredHeavy workload (designed for policy comparison)...\n");
+    results.push_back(run_comprehensive<ClusteredHeavy>(get_workload_name<ClusteredHeavy>(), 50, d_data, n, threads, prop, h_data));
+
     // Original AI workloads
+    fprintf(stderr, "# Running AI workloads...\n");
     results.push_back(run_comprehensive<MixtureOfExperts>(get_workload_name<MixtureOfExperts>(), 75, d_data, n, threads, prop, h_data));
     results.push_back(run_comprehensive<NLPVariableSequence>(get_workload_name<NLPVariableSequence>(), 80, d_data, n, threads, prop, h_data));
     results.push_back(run_comprehensive<GraphNeuralNetwork>(get_workload_name<GraphNeuralNetwork>(), 50, d_data, n, threads, prop, h_data));
@@ -243,6 +253,7 @@ int main(int argc, char** argv) {
     results.push_back(run_comprehensive<VideoProcessing>(get_workload_name<VideoProcessing>(), 65, d_data, n, threads, prop, h_data));
 
     // GEMM workloads
+    fprintf(stderr, "# Running GEMM workloads...\n");
     results.push_back(run_comprehensive<GEMMBalanced>(get_workload_name<GEMMBalanced>(), 40, d_data, n, threads, prop, h_data));
     results.push_back(run_comprehensive<GEMMImbalanced>(get_workload_name<GEMMImbalanced>(), 45, d_data, n, threads, prop, h_data));
     results.push_back(run_comprehensive<GEMMVariableSize>(get_workload_name<GEMMVariableSize>(), 50, d_data, n, threads, prop, h_data));
