@@ -149,14 +149,14 @@ struct SelectiveBlocksPolicy {
 // ----------------------------------------------------------------------------
 
 struct ProbeEveryN_ExitOnFailure {
-    static constexpr int N = 3;  // Probe every N iterations
+    static constexpr int N = 2;  // Probe every N iterations
 
     struct State {
         int iter;
     };
 
     __device__ static void init(State& s) {
-        s.iter = 1;
+        s.iter = 0;
     }
 
     __device__ static bool should_try_steal(State& s) {

@@ -1,134 +1,240 @@
 #!/usr/bin/env python3
+"""
+CLC Policy Benchmark Driver
+
+Runs the CLC policy benchmark and provides analysis and visualization.
+"""
+
 import subprocess
 import pandas as pd
 import matplotlib.pyplot as plt
+import sys
+import argparse
+from pathlib import Path
 
-# Test configurations
-sizes = [
-    (1024 * 256, "256K"),
-    (1024 * 512, "512K"),
-    (1024 * 1024, "1M"),
-    (1024 * 1024 * 2, "2M"),
-    (1024 * 1024 * 4, "4M"),
-]
-threads = 256
-
-all_results = []
-
-print("Running benchmarks...")
-for size, label in sizes:
-    print(f"Testing size: {label} elements")
+def run_benchmark(binary="./clc_policy_benchmark", size=1048576, threads=256):
+    """Run the benchmark binary and return CSV output."""
+    print(f"Running benchmark: size={size}, threads={threads}")
     result = subprocess.run(
-        ["./clc_benchmark_workloads", str(size), str(threads)],
+        [binary, str(size), str(threads)],
         capture_output=True,
         text=True
     )
 
     if result.returncode != 0:
-        print(f"Error running benchmark with size {label}")
-        print(result.stderr)
-        continue
+        print(f"Error running benchmark!", file=sys.stderr)
+        print(f"STDERR: {result.stderr}", file=sys.stderr)
+        sys.exit(1)
 
-    lines = result.stdout.strip().split('\n')
+    return result.stdout
 
-    for line in lines[1:]:
-        parts = line.split(',')
-        if len(parts) >= 12:
-            all_results.append({
-                'Size': label,
-                'Scenario': parts[0].split(':')[0],
-                'FixedWork_ms': float(parts[2]),
-                'FixedBlocks_ms': float(parts[4]),
-                'CLC_ms': float(parts[6]),
-            })
+def parse_csv_output(output):
+    """Parse CSV output into DataFrames (single table only)."""
+    lines = output.strip().split('\n')
 
-df = pd.DataFrame(all_results)
+    # Parse main results (only one table now)
+    results_data = []
+    header = None
 
-# Create single comparison figure
-fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-fig.suptitle('CLC vs Fixed Blocks vs Fixed Work - Execution Time Comparison', fontsize=16)
+    for line in lines:
+        if line.startswith("Workload,Prologue"):
+            header = line.strip().split(',')
+        elif header and line.strip() and not line.startswith('#'):
+            values = line.strip().split(',')
+            if len(values) == len(header):
+                results_data.append(dict(zip(header, values)))
 
-scenarios = df['Scenario'].unique()
-size_order = ["256K", "512K", "1M", "2M", "4M"]
+    df_results = pd.DataFrame(results_data)
 
-for idx, scenario in enumerate(scenarios):
-    row = idx // 3
-    col = idx % 3
-    ax = axes[row, col]
+    # Calculate speedup in the dataframe
+    df_speedup = df_results.copy()
+    if 'CLCBaseline_ms' in df_speedup.columns:
+        for col in df_speedup.columns:
+            if col.endswith('_ms') and col != 'CLCBaseline_ms':
+                policy_name = col.replace('_ms', '')
+                baseline = pd.to_numeric(df_speedup['CLCBaseline_ms'], errors='coerce')
+                policy_time = pd.to_numeric(df_speedup[col], errors='coerce')
+                df_speedup[f'{policy_name}_speedup'] = ((baseline - policy_time) / baseline * 100)
 
-    scenario_data = df[df['Scenario'] == scenario]
-    scenario_data = scenario_data.set_index('Size').reindex(size_order).reset_index()
+    return df_results, df_speedup
 
-    x = range(len(scenario_data))
-    width = 0.25
+def save_csv(df_results, df_speedup, output_file):
+    """Save results to CSV file (single table only)."""
+    with open(output_file, 'w') as f:
+        df_results.to_csv(f, index=False)
+    print(f"Results saved to {output_file}")
 
-    ax.bar([i - width for i in x], scenario_data['FixedWork_ms'], width, label='Fixed Work', alpha=0.8)
-    ax.bar(x, scenario_data['FixedBlocks_ms'], width, label='Fixed Blocks', alpha=0.8)
-    ax.bar([i + width for i in x], scenario_data['CLC_ms'], width, label='CLC', alpha=0.8)
+def print_summary(df_results, df_speedup):
+    """Print summary of benchmark results."""
+    print("\n" + "="*80)
+    print("BENCHMARK SUMMARY")
+    print("="*80)
 
-    ax.set_xlabel('Array Size')
-    ax.set_ylabel('Execution Time (ms)')
-    ax.set_title(scenario)
-    ax.set_xticks(x)
-    ax.set_xticklabels(scenario_data['Size'])
-    ax.legend()
-    ax.grid(axis='y', alpha=0.3)
+    # Convert numeric columns
+    for col in df_results.columns:
+        if col not in ['Workload']:
+            df_results[col] = pd.to_numeric(df_results[col], errors='ignore')
 
-plt.tight_layout()
-plt.savefig('clc_benchmark_results.png', dpi=300, bbox_inches='tight')
-print(f"\nSaved visualization to clc_benchmark_results.png")
+    policies = ['Greedy', 'MaxSteals', 'Throttled', 'Selective',
+                'ProbeEveryN', 'LatencyBudget', 'TokenBucket', 'Voting']
 
-# Calculate speedups
-df['Speedup_vs_FixedWork'] = ((df['FixedWork_ms'] - df['CLC_ms']) / df['FixedWork_ms'] * 100)
-df['Speedup_vs_FixedBlocks'] = ((df['FixedBlocks_ms'] - df['CLC_ms']) / df['FixedBlocks_ms'] * 100)
+    print(f"\nWorkloads tested: {len(df_results)}")
+    print("\nBest policy per workload (lowest execution time):")
+    print("-" * 80)
 
-# Print detailed results in Markdown format
-print("\n# CLC Benchmark Results - Detailed Speedup Report\n")
+    for _, row in df_results.iterrows():
+        workload = row['Workload']
+        best_policy = None
+        best_time = float('inf')
 
-for size in size_order:
-    size_data = df[df['Size'] == size]
-    if len(size_data) == 0:
-        continue
+        for policy in policies:
+            time_col = f"{policy}_ms"
+            if time_col in row:
+                time = float(row[time_col])
+                if time < best_time:
+                    best_time = time
+                    best_policy = policy
 
-    print(f"\n## Size: {size} elements\n")
-    print("| Workload | FixedWork (ms) | FixedBlock (ms) | CLC (ms) | vs FixWork | vs FixBlk |")
-    print("|----------|----------------|-----------------|----------|------------|-----------|")
+        baseline = float(row['CLCBaseline_ms'])
+        speedup = ((baseline - best_time) / baseline * 100) if baseline > 0 else 0
+        print(f"{workload:40s} -> {best_policy:15s} ({best_time:.3f}ms, {speedup:+.1f}%)")
 
-    for _, row in size_data.iterrows():
-        speedup_fw = row['Speedup_vs_FixedWork']
-        speedup_fb = row['Speedup_vs_FixedBlocks']
+    if df_speedup is not None:
+        print("\n\nAverage speedup vs CLC Baseline:")
+        print("-" * 80)
 
-        # Format speedup with + or - sign
-        speedup_fw_str = f"{speedup_fw:+.2f}%"
-        speedup_fb_str = f"{speedup_fb:+.2f}%"
+        for col in df_speedup.columns:
+            if col != 'Workload':
+                df_speedup[col] = pd.to_numeric(df_speedup[col], errors='ignore')
 
-        print(f"| {row['Scenario']} | {row['FixedWork_ms']:.3f} | {row['FixedBlocks_ms']:.3f} | "
-              f"{row['CLC_ms']:.3f} | {speedup_fw_str} | {speedup_fb_str} |")
+        for policy in policies:
+            speedup_col = f"{policy}_speedup"
+            if speedup_col in df_speedup.columns:
+                avg = df_speedup[speedup_col].mean()
+                print(f"{policy:20s}: {avg:+7.2f}%")
 
-# Print summary
-print("\n---\n")
-print("## Summary\n")
+    print("="*80)
 
-avg_speedup_fw = df['Speedup_vs_FixedWork'].mean()
-avg_speedup_fb = df['Speedup_vs_FixedBlocks'].mean()
+def generate_plots(df_results, df_speedup, output_prefix='benchmark'):
+    """Generate a single combined visualization plot with all policies."""
+    import numpy as np
 
-print("### Overall Average Speedup\n")
-print(f"- **CLC vs Fixed Work**: {avg_speedup_fw:+.2f}%")
-print(f"- **CLC vs Fixed Blocks**: {avg_speedup_fb:+.2f}%\n")
+    # Convert numeric columns
+    for col in df_results.columns:
+        if col not in ['Workload']:
+            try:
+                df_results[col] = pd.to_numeric(df_results[col])
+            except:
+                pass
 
-print("### Best Configurations\n")
-print("| # | Workload | Size | vs FixWork | vs FixBlk | CLC Time (ms) |")
-print("|---|----------|------|------------|-----------|---------------|")
+    workloads = df_results['Workload'].tolist()
 
-top5 = df.nlargest(5, 'Speedup_vs_FixedBlocks')
-for i, (idx, row) in enumerate(top5.iterrows(), 1):
-    print(f"| {i} | {row['Scenario']} | {row['Size']} | {row['Speedup_vs_FixedWork']:+.2f}% | "
-          f"{row['Speedup_vs_FixedBlocks']:+.2f}% | {row['CLC_ms']:.3f} |")
+    # Create a grid of subplots (3 rows x 3 columns)
+    fig, axes = plt.subplots(3, 3, figsize=(20, 14))
+    fig.suptitle('CLC Policy Benchmark - Execution Time Comparison (All Policies)', fontsize=18, fontweight='bold')
 
-wins_fw = (df['Speedup_vs_FixedWork'] > 0).sum()
-wins_fb = (df['Speedup_vs_FixedBlocks'] > 0).sum()
-total = len(df)
+    # Flatten axes for easier iteration
+    axes = axes.flatten()
 
-print(f"\n### Win Rate\n")
-print(f"- **vs Fixed Work**: {wins_fw}/{total} ({wins_fw/total*100:.1f}%)")
-print(f"- **vs Fixed Blocks**: {wins_fb}/{total} ({wins_fb/total*100:.1f}%)\n")
+    # All policies to compare
+    all_policies = ['FixedWork', 'FixedBlocks', 'CLCBaseline', 'Greedy', 'MaxSteals',
+                    'Throttled', 'Selective', 'ProbeEveryN', 'LatencyBudget', 'TokenBucket', 'Voting']
+
+    # Colors for the bars (use tab20 colormap)
+    colors = plt.cm.tab20(np.linspace(0, 1, len(all_policies)))
+
+    # Plot each workload in a separate subplot
+    for idx, workload in enumerate(workloads):
+        if idx >= 9:  # Only plot first 9 workloads
+            break
+
+        ax = axes[idx]
+        row = df_results[df_results['Workload'] == workload].iloc[0]
+
+        # Get times for all policies
+        times = []
+        policy_labels = []
+        for p in all_policies:
+            col = f'{p}_ms'
+            if col in row:
+                times.append(float(row[col]))
+                policy_labels.append(p)
+
+        # Create bar chart
+        x = np.arange(len(policy_labels))
+        width = 0.7
+
+        bars = ax.bar(x, times, width, color=colors[:len(policy_labels)], alpha=0.85, edgecolor='black', linewidth=0.5)
+
+        # Formatting
+        ax.set_ylabel('Execution Time (ms)', fontsize=10)
+        ax.set_title(workload[:35], fontsize=11, fontweight='bold')
+        ax.set_xticks(x)
+        # Shorter labels for better readability
+        short_labels = ['FW', 'FB', 'Base', 'Grdy', 'MaxS', 'Thrtl', 'Sel', 'ProbeN', 'LatBdg', 'Token', 'Vote']
+        ax.set_xticklabels(short_labels[:len(policy_labels)], fontsize=8, rotation=45, ha='right')
+        ax.grid(axis='y', alpha=0.3, linestyle='--', linewidth=0.5)
+
+        # Add value labels on top of bars for the best (lowest) time
+        min_time = min(times)
+        min_idx = times.index(min_time)
+        ax.text(min_idx, times[min_idx], f'{times[min_idx]:.3f}',
+                ha='center', va='bottom', fontsize=7, fontweight='bold', color='red')
+
+    # Remove any unused subplots
+    for idx in range(len(workloads), 9):
+        fig.delaxes(axes[idx])
+
+    # Add a legend at the bottom
+    legend_labels = ['FixedWork', 'FixedBlocks', 'CLCBaseline', 'Greedy', 'MaxSteals',
+                     'Throttled', 'Selective', 'ProbeEveryN', 'LatencyBudget', 'TokenBucket', 'Voting']
+    legend_handles = [plt.Rectangle((0,0),1,1, fc=colors[i], alpha=0.85, edgecolor='black', linewidth=0.5)
+                      for i in range(len(legend_labels))]
+    fig.legend(legend_handles, legend_labels, loc='lower center', ncol=6, fontsize=10,
+               bbox_to_anchor=(0.5, -0.02), frameon=True, fancybox=True, shadow=True)
+
+    plt.tight_layout(rect=[0, 0.02, 1, 0.97])
+    output_file = f"{output_prefix}_results.png"
+    plt.savefig(output_file, dpi=300, bbox_inches='tight')
+    print(f"Saved plot: {output_file}")
+    plt.close()
+
+def main():
+    parser = argparse.ArgumentParser(description="Run CLC Policy Benchmark")
+    parser.add_argument('--size', type=int, default=1048576, help='Problem size (default: 1048576)')
+    parser.add_argument('--threads', type=int, default=256, help='Threads per block (default: 256)')
+    parser.add_argument('--output', type=str, default='benchmark_results.csv', help='Output CSV file')
+    parser.add_argument('--binary', type=str, default='./clc_policy_benchmark', help='Benchmark binary path')
+    parser.add_argument('--no-summary', action='store_true', help='Skip summary output')
+    parser.add_argument('--plot', action='store_true', help='Generate visualization plots')
+    parser.add_argument('--plot-prefix', type=str, default='benchmark', help='Prefix for plot filenames')
+
+    args = parser.parse_args()
+
+    if not Path(args.binary).exists():
+        print(f"ERROR: Binary not found: {args.binary}", file=sys.stderr)
+        print("Please run 'make clc_policy_benchmark' first", file=sys.stderr)
+        sys.exit(1)
+
+    # Run benchmark
+    output = run_benchmark(args.binary, args.size, args.threads)
+
+    # Parse results
+    df_results, df_speedup = parse_csv_output(output)
+
+    # Save to file
+    save_csv(df_results, df_speedup, args.output)
+
+    # Print summary
+    if not args.no_summary:
+        print_summary(df_results, df_speedup)
+
+    # Generate plots
+    if args.plot:
+        print("\nGenerating plots...")
+        generate_plots(df_results, df_speedup, args.plot_prefix)
+
+    print("\nDone!")
+
+if __name__ == "__main__":
+    main()

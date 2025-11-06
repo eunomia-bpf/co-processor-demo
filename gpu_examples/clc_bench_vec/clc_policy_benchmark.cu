@@ -132,17 +132,23 @@ void run_specialized(const char* workload_name, const char* use_case, const char
 }
 
 // ============================================================================
-// CSV Output Functions
+// Table Printing Functions
 // ============================================================================
 
 void print_table_header() {
-    printf("Workload,Prologue,FixedWork_ms,FixedBlocks_ms,CLCBaseline_ms,Greedy_ms,MaxSteals_ms,Throttled_ms,Selective_ms,ProbeEveryN_ms,LatencyBudget_ms,TokenBucket_ms,Voting_ms,");
-    printf("CLCBaseline_steals,Greedy_steals,MaxSteals_steals,Throttled_steals,Selective_steals,ProbeEveryN_steals,LatencyBudget_steals,TokenBucket_steals,Voting_steals\n");
+    printf("\n");
+    printf("==============================================================================================================================================================================\n");
+    printf("%-35s | %10s | %10s | %10s | %10s | %10s | %10s | %10s | %10s | %10s | %10s | %10s\n",
+           "Workload (Prologue)",
+           "FixedWork", "FixedBlks", "CLC-Base",
+           "Greedy", "MaxSteals", "Throttled", "Selective",
+           "ProbeEvryN", "LatencyBdg", "TokenBkt", "Voting");
+    printf("==============================================================================================================================================================================\n");
 }
 
 void print_table_row_time(const ComprehensiveResult& r) {
-    printf("%s,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,",
-           r.workload_name, r.prologue,
+    printf("%-35s | %10.3f | %10.3f | %10.3f | %10.3f | %10.3f | %10.3f | %10.3f | %10.3f | %10.3f | %10.3f | %10.3f | (ms)\n",
+           r.workload_name,
            r.fixed_work.avg_time_ms,
            r.fixed_blocks.avg_time_ms,
            r.clc_baseline.avg_time_ms,
@@ -154,7 +160,11 @@ void print_table_row_time(const ComprehensiveResult& r) {
            r.latency_budget.avg_time_ms,
            r.token_bucket.avg_time_ms,
            r.voting.avg_time_ms);
-    printf("%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f\n",
+}
+
+void print_table_row_steals(const ComprehensiveResult& r) {
+    printf("  └─ Steals                        | %10s | %10s | %10.0f | %10.0f | %10.0f | %10.0f | %10.0f | %10.0f | %10.0f | %10.0f | %10.0f |\n",
+           "-", "-",
            r.clc_baseline.avg_steals,
            r.greedy.avg_steals,
            r.maxsteals.avg_steals,
@@ -166,17 +176,20 @@ void print_table_row_time(const ComprehensiveResult& r) {
            r.voting.avg_steals);
 }
 
-void print_table_row_steals(const ComprehensiveResult& r) {
-    // Steals are now included in print_table_row_time, so this is a no-op
-}
-
 void print_speedup_analysis(const std::vector<ComprehensiveResult>& results) {
-    // Print speedup analysis as CSV
     printf("\n");
-    printf("Workload,Greedy_speedup,MaxSteals_speedup,Throttled_speedup,Selective_speedup,ProbeEveryN_speedup,LatencyBudget_speedup,TokenBucket_speedup,Voting_speedup,FixedWork_speedup,FixedBlocks_speedup\n");
+    printf("==============================================================================================================================================================================\n");
+    printf("SPEEDUP ANALYSIS (vs CLC Baseline, negative = slower)\n");
+    printf("==============================================================================================================================================================================\n");
+    printf("%-35s | %10s | %10s | %10s | %10s | %10s | %10s | %10s | %10s | %10s | %10s\n",
+           "Workload", "Greedy", "MaxSteals", "Throttled", "Selective",
+           "ProbeEvryN", "LatencyBdg", "TokenBkt", "Voting",
+           "FixedWork", "FixedBlks");
+    printf("==============================================================================================================================================================================\n");
+
     for (const auto& r : results) {
         float base = r.clc_baseline.avg_time_ms;
-        printf("%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
+        printf("%-35s | %9.1f%% | %9.1f%% | %9.1f%% | %9.1f%% | %9.1f%% | %9.1f%% | %9.1f%% | %9.1f%% | %9.1f%% | %9.1f%%\n",
                r.workload_name,
                ((base - r.greedy.avg_time_ms) / base) * 100.0f,
                ((base - r.maxsteals.avg_time_ms) / base) * 100.0f,
@@ -189,6 +202,7 @@ void print_speedup_analysis(const std::vector<ComprehensiveResult>& results) {
                ((base - r.fixed_work.avg_time_ms) / base) * 100.0f,
                ((base - r.fixed_blocks.avg_time_ms) / base) * 100.0f);
     }
+    printf("==============================================================================================================================================================================\n");
 }
 
 // ============================================================================
@@ -220,10 +234,17 @@ int main(int argc, char** argv) {
     float *d_data;
     cudaMalloc(&d_data, n * sizeof(float));
 
+    // Print header
+    printf("========================================================\n");
+    printf("CLC Policy Benchmark - Comprehensive Evaluation\n");
+    printf("Device: %s (CC %d.%d)\n", prop.name, prop.major, prop.minor);
+    printf("Elements: %d, Threads/Block: %d\n", n, threads);
+    printf("========================================================\n");
+
     // Run all comprehensive benchmarks
     std::vector<ComprehensiveResult> results;
 
-    // Original AI workloads
+    printf("\nRunning comprehensive benchmarks...\n");
     results.push_back(run_comprehensive<MixtureOfExperts>(get_workload_name<MixtureOfExperts>(), 75, d_data, n, threads, prop, h_data));
     results.push_back(run_comprehensive<NLPVariableSequence>(get_workload_name<NLPVariableSequence>(), 80, d_data, n, threads, prop, h_data));
     results.push_back(run_comprehensive<GraphNeuralNetwork>(get_workload_name<GraphNeuralNetwork>(), 50, d_data, n, threads, prop, h_data));
@@ -231,17 +252,41 @@ int main(int argc, char** argv) {
     results.push_back(run_comprehensive<SparseAttention>(get_workload_name<SparseAttention>(), 70, d_data, n, threads, prop, h_data));
     results.push_back(run_comprehensive<VideoProcessing>(get_workload_name<VideoProcessing>(), 65, d_data, n, threads, prop, h_data));
 
-    // GEMM workloads
-    results.push_back(run_comprehensive<GEMMBalanced>(get_workload_name<GEMMBalanced>(), 40, d_data, n, threads, prop, h_data));
-    results.push_back(run_comprehensive<GEMMImbalanced>(get_workload_name<GEMMImbalanced>(), 45, d_data, n, threads, prop, h_data));
-    results.push_back(run_comprehensive<GEMMVariableSize>(get_workload_name<GEMMVariableSize>(), 50, d_data, n, threads, prop, h_data));
-
-    // Print comprehensive table in CSV format (single table only)
+    // Print comprehensive table
     print_table_header();
     for (const auto& r : results) {
         print_table_row_time(r);
         print_table_row_steals(r);
     }
+    printf("==============================================================================================================================================================================\n");
+
+    // Print speedup analysis
+    print_speedup_analysis(results);
+
+    // Part 2: Specialized policies for production use cases
+    printf("\n");
+    printf("========================================================\n");
+    printf("SPECIALIZED POLICY EVALUATION\n");
+    printf("(Production Policies for Real-World Use Cases)\n");
+    printf("========================================================\n");
+
+    printf("\n=== Scenario 1: Streaming Inference (Latency-Critical) ===\n");
+    run_specialized<MixtureOfExperts>("MoE Inference",
+        "Online inference with SLO requirements",
+        "LatencyBudgetPolicy - bounds tail latency",
+        75, d_data, n, threads, h_data);
+
+    printf("\n=== Scenario 2: Memory-Bound ETL/Compression ===\n");
+    run_specialized<NLPVariableSequence>("NLP Processing",
+        "High bandwidth utilization, prevent thrashing",
+        "TokenBucketPolicy - rate-limits for fairness",
+        80, d_data, n, threads, h_data);
+
+    printf("\n=== Scenario 3: Interactive/Cooperative Workloads ===\n");
+    run_specialized<GraphNeuralNetwork>("GNN Training",
+        "Low-priority background job, drain for high-priority",
+        "ProbeEveryN - reduces overhead, fast drain",
+        50, d_data, n, threads, h_data);
 
     cudaFree(d_data);
     free(h_data);

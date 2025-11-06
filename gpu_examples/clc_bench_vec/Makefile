@@ -74,8 +74,7 @@ info:
 clean:
 	rm -f clc_policy_benchmark
 	rm -f /tmp/clc*.ptx /tmp/clc*.cubin
-	rm -f *.csv *.png
-	@echo "Cleaned all binaries, temp files, CSV and PNG files"
+	@echo "Cleaned all binaries and temp files"
 
 # ============================================
 # HELP
