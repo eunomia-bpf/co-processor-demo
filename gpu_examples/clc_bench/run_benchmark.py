@@ -75,8 +75,11 @@ def print_summary(df_results, df_speedup):
         if col not in ['Workload']:
             df_results[col] = pd.to_numeric(df_results[col], errors='ignore')
 
-    policies = ['Greedy', 'MaxSteals', 'Throttled', 'Selective',
-                'ProbeEveryN', 'LatencyBudget', 'TokenBucket', 'Voting']
+    # Extract policy names from columns ending with _ms (excluding baselines)
+    policies = []
+    for col in df_results.columns:
+        if col.endswith('_ms') and col not in ['FixedWork_ms', 'FixedBlocks_ms', 'CLCBaseline_ms']:
+            policies.append(col.replace('_ms', ''))
 
     print(f"\nWorkloads tested: {len(df_results)}")
     print("\nBest policy per workload (lowest execution time):")
@@ -136,9 +139,11 @@ def generate_plots(df_results, df_speedup, output_prefix='benchmark'):
     # Flatten axes for easier iteration
     axes = axes.flatten()
 
-    # All policies to compare
-    all_policies = ['FixedWork', 'FixedBlocks', 'CLCBaseline', 'Greedy', 'MaxSteals',
-                    'Throttled', 'Selective', 'ProbeEveryN', 'LatencyBudget', 'TokenBucket', 'Voting']
+    # Extract all policies from columns ending with _ms
+    all_policies = []
+    for col in df_results.columns:
+        if col.endswith('_ms'):
+            all_policies.append(col.replace('_ms', ''))
 
     # Colors for the bars (use tab20 colormap)
     colors = plt.cm.tab20(np.linspace(0, 1, len(all_policies)))
@@ -170,9 +175,16 @@ def generate_plots(df_results, df_speedup, output_prefix='benchmark'):
         ax.set_ylabel('Execution Time (ms)', fontsize=10)
         ax.set_title(workload[:35], fontsize=11, fontweight='bold')
         ax.set_xticks(x)
-        # Shorter labels for better readability
-        short_labels = ['FW', 'FB', 'Base', 'Grdy', 'MaxS', 'Thrtl', 'Sel', 'ProbeN', 'LatBdg', 'Token', 'Vote']
-        ax.set_xticklabels(short_labels[:len(policy_labels)], fontsize=8, rotation=45, ha='right')
+        # Generate short labels dynamically (first 6 chars or abbreviations)
+        short_labels = []
+        for label in policy_labels:
+            if len(label) <= 6:
+                short_labels.append(label)
+            else:
+                # Create abbreviation from capital letters or first 6 chars
+                abbrev = ''.join([c for c in label if c.isupper()])
+                short_labels.append(abbrev if abbrev else label[:6])
+        ax.set_xticklabels(short_labels, fontsize=8, rotation=45, ha='right')
         ax.grid(axis='y', alpha=0.3, linestyle='--', linewidth=0.5)
 
         # Add value labels on top of bars for the best (lowest) time
@@ -185,12 +197,10 @@ def generate_plots(df_results, df_speedup, output_prefix='benchmark'):
     for idx in range(len(workloads), 9):
         fig.delaxes(axes[idx])
 
-    # Add a legend at the bottom
-    legend_labels = ['FixedWork', 'FixedBlocks', 'CLCBaseline', 'Greedy', 'MaxSteals',
-                     'Throttled', 'Selective', 'ProbeEveryN', 'LatencyBudget', 'TokenBucket', 'Voting']
+    # Add a legend at the bottom with actual policy names
     legend_handles = [plt.Rectangle((0,0),1,1, fc=colors[i], alpha=0.85, edgecolor='black', linewidth=0.5)
-                      for i in range(len(legend_labels))]
-    fig.legend(legend_handles, legend_labels, loc='lower center', ncol=6, fontsize=10,
+                      for i in range(len(all_policies))]
+    fig.legend(legend_handles, all_policies, loc='lower center', ncol=6, fontsize=10,
                bbox_to_anchor=(0.5, -0.02), frameon=True, fancybox=True, shadow=True)
 
     plt.tight_layout(rect=[0, 0.02, 1, 0.97])

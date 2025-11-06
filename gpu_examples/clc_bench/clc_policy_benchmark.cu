@@ -58,9 +58,9 @@ ComprehensiveResult run_comprehensive(const char* scenario, int prologue,
     // Run all policies
     result.greedy = run_clc_policy<WorkloadType, GreedyPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
     result.maxsteals = run_clc_policy<WorkloadType, MaxStealsPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
-    result.throttled = run_clc_policy<WorkloadType, ThrottledPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
+    result.throttled = run_clc_policy<WorkloadType, NeverStealPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
     result.selective = run_clc_policy<WorkloadType, SelectiveBlocksPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
-    result.probe_everyn = run_clc_policy<WorkloadType, ProbeEveryN_ExitOnFailure>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
+    result.probe_everyn = run_clc_policy<WorkloadType, WorkloadAwarePolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
     result.latency_budget = run_clc_policy<WorkloadType, LatencyBudgetPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
     result.token_bucket = run_clc_policy<WorkloadType, TokenBucketPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
     result.voting = run_clc_policy<WorkloadType, VotingPolicy>(d_data, n, blocks_clc, threads, h_data, prologue, warmup, runs);
@@ -93,10 +93,10 @@ void run_specialized(const char* workload_name, const char* use_case, const char
     printf("%-30s | %10.3f | %10.0f | %10.0f\n",
            "Greedy (baseline)", r_greedy.avg_time_ms, r_greedy.avg_blocks, r_greedy.avg_steals);
 
-    BenchmarkResult r_probe = run_clc_policy<WorkloadType, ProbeEveryN_ExitOnFailure>(
+    BenchmarkResult r_probe = run_clc_policy<WorkloadType, WorkloadAwarePolicy>(
         d_data, n, blocks, threads, h_data, prologue, warmup, runs);
     printf("%-30s | %10.3f | %10.0f | %10.0f\n",
-           "ProbeEveryN (N=2)", r_probe.avg_time_ms, r_probe.avg_blocks, r_probe.avg_steals);
+           "WorkloadAware (co-designed)", r_probe.avg_time_ms, r_probe.avg_blocks, r_probe.avg_steals);
 
     BenchmarkResult r_latency = run_clc_policy<WorkloadType, LatencyBudgetPolicy>(
         d_data, n, blocks, threads, h_data, prologue, warmup, runs);
@@ -117,7 +117,7 @@ void run_specialized(const char* workload_name, const char* use_case, const char
 
     printf("\nAnalysis:\n");
     float probe_overhead = ((r_probe.avg_time_ms - r_greedy.avg_time_ms) / r_greedy.avg_time_ms) * 100.0f;
-    printf("  ProbeEveryN: %.2f%% (cooperative drain, fast response)\n", probe_overhead);
+    printf("  WorkloadAware: %.2f%% (co-designed for imbalance patterns)\n", probe_overhead);
 
     float latency_impact = ((r_latency.avg_time_ms - r_greedy.avg_time_ms) / r_greedy.avg_time_ms) * 100.0f;
     printf("  LatencyBudget: %.2f%% (stable p95/p99 latency)\n", latency_impact);
@@ -126,7 +126,7 @@ void run_specialized(const char* workload_name, const char* use_case, const char
     printf("  TokenBucket: %.2f%% (bandwidth fairness)\n", token_impact);
 
     printf("  Steals reduction:\n");
-    printf("    ProbeEveryN: %.1f%%\n", 100.0f * (r_greedy.avg_steals - r_probe.avg_steals) / r_greedy.avg_steals);
+    printf("    WorkloadAware: %.1f%%\n", 100.0f * (r_greedy.avg_steals - r_probe.avg_steals) / r_greedy.avg_steals);
     printf("    LatencyBudget: %.1f%%\n", 100.0f * (r_greedy.avg_steals - r_latency.avg_steals) / r_greedy.avg_steals);
     printf("    TokenBucket: %.1f%%\n", 100.0f * (r_greedy.avg_steals - r_token.avg_steals) / r_greedy.avg_steals);
 }
@@ -136,8 +136,8 @@ void run_specialized(const char* workload_name, const char* use_case, const char
 // ============================================================================
 
 void print_table_header() {
-    printf("Workload,Prologue,FixedWork_ms,FixedBlocks_ms,CLCBaseline_ms,Greedy_ms,MaxSteals_ms,Throttled_ms,Selective_ms,ProbeEveryN_ms,LatencyBudget_ms,TokenBucket_ms,Voting_ms,");
-    printf("CLCBaseline_steals,Greedy_steals,MaxSteals_steals,Throttled_steals,Selective_steals,ProbeEveryN_steals,LatencyBudget_steals,TokenBucket_steals,Voting_steals\n");
+    printf("Workload,Prologue,FixedWork_ms,FixedBlocks_ms,CLCBaseline_ms,Greedy_ms,MaxSteals_ms,NeverSteal_ms,Selective_ms,WorkloadAware_ms,LatencyBudget_ms,TokenBucket_ms,Voting_ms,");
+    printf("CLCBaseline_steals,Greedy_steals,MaxSteals_steals,NeverSteal_steals,Selective_steals,WorkloadAware_steals,LatencyBudget_steals,TokenBucket_steals,Voting_steals\n");
 }
 
 void print_table_row_time(const ComprehensiveResult& r) {
@@ -173,7 +173,7 @@ void print_table_row_steals(const ComprehensiveResult& r) {
 void print_speedup_analysis(const std::vector<ComprehensiveResult>& results) {
     // Print speedup analysis as CSV
     printf("\n");
-    printf("Workload,Greedy_speedup,MaxSteals_speedup,Throttled_speedup,Selective_speedup,ProbeEveryN_speedup,LatencyBudget_speedup,TokenBucket_speedup,Voting_speedup,FixedWork_speedup,FixedBlocks_speedup\n");
+    printf("Workload,Greedy_speedup,MaxSteals_speedup,NeverSteal_speedup,Selective_speedup,WorkloadAware_speedup,LatencyBudget_speedup,TokenBucket_speedup,Voting_speedup,FixedWork_speedup,FixedBlocks_speedup\n");
     for (const auto& r : results) {
         float base = r.clc_baseline.avg_time_ms;
         printf("%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n",
