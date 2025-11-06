@@ -36,10 +36,6 @@ struct GreedyPolicy {
     __device__ static bool should_try_steal(State& s) {
         return true;  // Always try to steal
     }
-
-    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
-        return true;  // Always continue
-    }
 };
 
 
@@ -61,12 +57,11 @@ struct MaxStealsPolicy {
     }
 
     __device__ static bool should_try_steal(State& s) {
-        return s.steals_done < max_steals;
-    }
-
-    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
-        s.steals_done++;  // Thread 0 updates; framework ensures uniform control
-        return s.steals_done < max_steals;
+        bool can_steal = s.steals_done < max_steals;
+        if (can_steal) {
+            s.steals_done++;  // Increment on attempt (will be used in next iteration)
+        }
+        return can_steal;
     }
 };
 
@@ -93,10 +88,6 @@ struct ThrottledPolicy {
         s.iteration++;
         return result;
     }
-
-    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
-        return true;  // Continue (throttling happens in should_try_steal)
-    }
 };
 
 
@@ -119,10 +110,6 @@ struct SelectiveBlocksPolicy {
 
     __device__ static bool should_try_steal(State& s) {
         // Only first half of blocks steal aggressively
-        return s.block_id < s.half_blocks;
-    }
-
-    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
         return s.block_id < s.half_blocks;
     }
 };
@@ -164,10 +151,6 @@ struct ProbeEveryN_ExitOnFailure {
         s.iter++;
         return go;
     }
-
-    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
-        return true;  // Exit is triggered by orchestrator on CLC failure
-    }
 };
 
 
@@ -197,10 +180,6 @@ struct LatencyBudgetPolicy {
     }
 
     __device__ static bool should_try_steal(State& s) {
-        return (clock64() - s.t0) <= budget_ns;
-    }
-
-    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
         return (clock64() - s.t0) <= budget_ns;
     }
 };
@@ -242,13 +221,11 @@ struct TokenBucketPolicy {
         s.tokens = fminf(burst, s.tokens + dt * rate_per_ns);
 
         // Only steal when we have at least one token
-        return s.tokens >= 1.0f;
-    }
-
-    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
-        // Consume one token
-        s.tokens = fmaxf(0.0f, s.tokens - 1.0f);
-        return true;
+        if (s.tokens >= 1.0f) {
+            s.tokens = fmaxf(0.0f, s.tokens - 1.0f);  // Consume token
+            return true;
+        }
+        return false;
     }
 };
 
@@ -281,10 +258,6 @@ struct VotingPolicy {
         bool decision = ((clock64() + s.iteration) & 0xFF) > 64;
         s.iteration++;
         return decision;
-    }
-
-    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
-        return true;  // Always continue after successful steal
     }
 };
 

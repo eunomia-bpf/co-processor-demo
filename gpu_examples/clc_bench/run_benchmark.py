@@ -206,7 +206,7 @@ def main():
     parser.add_argument('--output', type=str, default='benchmark_results.csv', help='Output CSV file')
     parser.add_argument('--binary', type=str, default='./clc_policy_benchmark', help='Benchmark binary path')
     parser.add_argument('--no-summary', action='store_true', help='Skip summary output')
-    parser.add_argument('--plot', action='store_true', help='Generate visualization plots')
+    parser.add_argument('--no-plot', action='store_true', help='Skip generating visualization plots')
     parser.add_argument('--plot-prefix', type=str, default='benchmark', help='Prefix for plot filenames')
 
     args = parser.parse_args()
@@ -229,8 +229,8 @@ def main():
     if not args.no_summary:
         print_summary(df_results, df_speedup)
 
-    # Generate plots
-    if args.plot:
+    # Generate plots by default
+    if not args.no_plot:
         print("\nGenerating plots...")
         generate_plots(df_results, df_speedup, args.plot_prefix)
 

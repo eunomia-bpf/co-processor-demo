@@ -31,7 +31,7 @@ namespace clc_policy {
 /**
  * @brief Template-based CLC Scheduler Policy Interface
  *
- * Policies provide 3 static callbacks that control block participation in
+ * Policies provide 2 static callbacks that control block participation in
  * work stealing. The CLC framework manages all hardware interactions and
  * enforces safety constraints.
  *
@@ -41,10 +41,10 @@ namespace clc_policy {
  *
  * Safety guarantees:
  * - Policy cannot submit requests after observing failure
- * - Policy cannot decode block IDs on failure
  * - Policy cannot violate CLC memory ordering or synchronization
  * - Skipping steal attempts is always safe
  * - Framework enforces uniform control flow (elect-and-broadcast pattern)
+ * - Barrier synchronization is always respected before policy decisions
  *
  * @tparam Policy The user-defined policy implementation
  */
@@ -65,29 +65,15 @@ struct ClcSchedulerPolicy {
 
     /**
      * @brief Decide whether to submit a steal request.
-     * Called BEFORE each steal attempt. Returning false safely skips the attempt.
+     * Called BEFORE each steal attempt. Returning false safely exits the loop.
      *
      * CRITICAL: This is called by thread 0 only. Framework broadcasts result.
      *
      * @param s Policy state (held by framework in __shared__ memory)
-     * @return true = submit steal request, false = skip (safe)
+     * @return true = submit steal request, false = exit loop
      */
     __device__ static bool should_try_steal(State& s) {
         return Policy::should_try_steal(s);
-    }
-
-    /**
-     * @brief Decide whether to continue after successful steal.
-     * Called AFTER a successful steal, with the stolen block ID.
-     *
-     * CRITICAL: This is called by thread 0 only. Framework broadcasts result.
-     *
-     * @param stolen_bx The block ID that was stolen (validated by hardware)
-     * @param s Policy state (held by framework in __shared__ memory)
-     * @return true = continue stealing, false = exit loop
-     */
-    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
-        return Policy::keep_going_after_success(stolen_bx, s);
     }
 };
 
@@ -116,11 +102,6 @@ struct AndPolicy {
     __device__ static bool should_try_steal(State& s) {
         return P1::should_try_steal(s.s1) && P2::should_try_steal(s.s2);
     }
-
-    __device__ static bool keep_going_after_success(int stolen_bx, State& s) {
-        return P1::keep_going_after_success(stolen_bx, s.s1) &&
-               P2::keep_going_after_success(stolen_bx, s.s2);
-    }
 };
 
 
@@ -132,13 +113,11 @@ struct AndPolicy {
  * @brief CLC kernel with policy-based scheduling
  *
  * This kernel orchestrates work-stealing using CLC hardware while respecting
- * policy decisions at two safe control points:
- * 1. Before submitting steal request (should_try_steal)
- * 2. After successful steal (keep_going_after_success)
+ * policy decisions before each steal attempt.
  *
  * Framework guarantees:
  * - Uniform control flow (all threads take same path)
- * - Proper CLC barrier synchronization
+ * - Proper CLC barrier synchronization (wait before policy check)
  * - Safe exit on CLC failure
  * - Thread 0 evaluates policy, broadcasts decision
  *
@@ -178,12 +157,7 @@ __global__ void kernel_cluster_launch_control_policy(
         }
         __syncthreads();
 
-        // All threads read the same decision and take the same path
-        if (!go) {
-            break;  // Uniform exit - policy decided to stop
-        }
-
-        if (cg::thread_block::thread_rank() == 0) {
+        if (go && cg::thread_block::thread_rank() == 0) {
             ptx::fence_proxy_async_generic_sync_restrict(ptx::sem_acquire, ptx::space_cluster, ptx::scope_cluster);
             cg::invoke_one(cg::coalesced_threads(), [&](){
                 ptx::clusterlaunchcontrol_try_cancel(&result, &bar);
@@ -196,12 +170,16 @@ __global__ void kernel_cluster_launch_control_policy(
             process_workload(WorkloadType{}, data, i, n, weight);
         }
 
+        if (!go) {
+            break;  // Uniform exit - policy decided to stop
+        }
+
         while (!ptx::mbarrier_try_wait_parity(ptx::sem_acquire, ptx::scope_cta, &bar, phase)) {}
         phase ^= 1;
 
         bool success = ptx::clusterlaunchcontrol_query_cancel_is_canceled(result);
         if (!success) {
-            break;  // CLC failure - must exit immediately (no policy check)
+            break;  // CLC failure - must exit immediately
         }
 
         bx = ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x<int>(result);
@@ -211,17 +189,6 @@ __global__ void kernel_cluster_launch_control_policy(
         }
 
         ptx::fence_proxy_async_generic_sync_restrict(ptx::sem_release, ptx::space_shared, ptx::scope_cluster);
-
-        // ELECT-AND-BROADCAST PATTERN: Thread 0 evaluates policy after success
-        if (threadIdx.x == 0) {
-            go = Policy::keep_going_after_success(bx, policy_state) ? 1 : 0;
-        }
-        __syncthreads();
-
-        // All threads read the same decision and take the same path
-        if (!go) {
-            break;  // Uniform exit - policy decided to stop
-        }
     }
 
     if (threadIdx.x == 0) {
