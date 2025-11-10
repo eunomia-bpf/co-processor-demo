@@ -1,0 +1,35 @@
+#cloud-config
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  network:
+    network:
+      version: 2
+      ethernets:
+        enp1s0:
+          dhcp4: true
+  identity:
+    hostname: qemu-cuda-dev
+    username: dev
+    password: '$6$rounds=4096$saltsaltsal$3E0FH.z1jtQcDqLjYN1Gp1xP2r.xLkGLHxL6K9EYXZy1XqKZ0OmH2Zvj5LGwOxj3d6hqJKfXXl5ZLv9WQpM8c/'
+  ssh:
+    install-server: true
+    allow-pw: true
+  storage:
+    layout:
+      name: lvm
+  packages:
+    - build-essential
+    - linux-headers-generic
+    - dkms
+    - git
+    - vim
+    - curl
+    - wget
+    - pciutils
+    - python3-pip
+  late-commands:
+    - echo 'dev ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/dev
+    - chmod 440 /target/etc/sudoers.d/dev
