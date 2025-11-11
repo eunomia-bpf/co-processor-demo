@@ -161,6 +161,102 @@ def find_smoking_guns(df):
     print("=" * 70)
 
 
+def show_combined_metrics_table(df):
+    """Show a table with both metrics for all workload cases."""
+
+    print()
+    print("=" * 70)
+    print("📊 COMBINED METRICS TABLE: All Workload Cases")
+    print("=" * 70)
+    print()
+    print("For each configuration, showing:")
+    print("  Metric 1: CLC vs FixedWork speedup (%)")
+    print("  Metric 2: Best policy vs Greedy speedup (%)")
+    print("=" * 70)
+    print()
+
+    policies = ['LatencyBudget', 'TokenBucket', 'Voting', 'ClusterAware',
+                'WorkloadAware', 'Selective', 'MaxSteals', 'NeverSteal']
+
+    # Collect all data
+    table_data = []
+
+    for idx, row in df.iterrows():
+        clc_vs_fixed = float(row.get('CLCBaseline_vs_FixedWork_pct', 0))
+
+        # Find best policy
+        best_speedup = -999
+        best_policy = None
+
+        for policy in policies:
+            speedup_col = f'{policy}_vs_Greedy_pct'
+            if speedup_col in row:
+                speedup = float(row[speedup_col])
+                if speedup > best_speedup:
+                    best_speedup = speedup
+                    best_policy = policy
+
+        table_data.append({
+            'workload': row['Workload'],
+            'config_n': int(float(row['config_n'])),
+            'config_threads': int(float(row['config_threads'])),
+            'config_imb': float(row['config_imbalance_scale']),
+            'config_work': float(row['config_workload_scale']),
+            'metric1_clc_vs_fixed': clc_vs_fixed,
+            'metric2_policy_vs_greedy': best_speedup,
+            'best_policy': best_policy if best_policy else 'N/A',
+            'both_positive': clc_vs_fixed > 0 and best_speedup > 0,
+            'both_good': clc_vs_fixed > 5 and best_speedup > 5,
+            'both_great': clc_vs_fixed > 10 and best_speedup > 10,
+        })
+
+    # Sort by combined score
+    table_data.sort(key=lambda x: x['metric1_clc_vs_fixed'] + x['metric2_policy_vs_greedy'], reverse=True)
+
+    # Print header
+    print(f"{'#':<4} {'Workload':<35} {'Config':<22} {'M1:CLC':<9} {'M2:Policy':<12} {'Best Policy':<15} {'Status':<10}")
+    print("-" * 140)
+
+    # Print rows
+    for i, item in enumerate(table_data, 1):
+        config_str = f"n={item['config_n']//1000}K,t={item['config_threads']},i={item['config_imb']:.1f},w={item['config_work']:.1f}"
+
+        # Determine status
+        if item['both_great']:
+            status = "🏆 BOTH>10"
+        elif item['both_good']:
+            status = "✅ BOTH>5"
+        elif item['both_positive']:
+            status = "⚠️  BOTH>0"
+        elif item['metric1_clc_vs_fixed'] > 5:
+            status = "M1 only"
+        elif item['metric2_policy_vs_greedy'] > 5:
+            status = "M2 only"
+        else:
+            status = "-"
+
+        workload_short = item['workload'][:35]
+
+        print(f"{i:<4} {workload_short:<35} {config_str:<22} {item['metric1_clc_vs_fixed']:>7.1f}% {item['metric2_policy_vs_greedy']:>10.1f}% {item['best_policy']:<15} {status:<10}")
+
+    print()
+    print("=" * 70)
+    print()
+
+    # Summary statistics
+    both_positive_count = sum(1 for item in table_data if item['both_positive'])
+    both_good_count = sum(1 for item in table_data if item['both_good'])
+    both_great_count = sum(1 for item in table_data if item['both_great'])
+
+    print("Summary:")
+    print(f"  Total configurations: {len(table_data)}")
+    print(f"  Both metrics > 0%:    {both_positive_count} ({both_positive_count*100//len(table_data)}%)")
+    print(f"  Both metrics > 5%:    {both_good_count} ({both_good_count*100//len(table_data) if len(table_data) > 0 else 0}%)")
+    print(f"  Both metrics > 10%:   {both_great_count} ({both_great_count*100//len(table_data) if len(table_data) > 0 else 0}%)")
+    print()
+    print("=" * 70)
+
+
 def find_both_satisfied(df):
     """Find cases where BOTH conditions are satisfied simultaneously."""
 
@@ -296,6 +392,7 @@ def main():
     analyze_clc_vs_static(df)
     analyze_policies_vs_clc(df)
     find_smoking_guns(df)
+    show_combined_metrics_table(df)
     find_both_satisfied(df)
 
     print()

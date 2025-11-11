@@ -621,3 +621,304 @@ make clc_policy_benchmark
 **Research Date:** January 2025
 **Hardware:** NVIDIA GPU with Compute Capability 10.0+ (CLC support)
 **Key Finding:** Simple time-based throttling (LatencyBudget) beats complex targeting heuristics by 20%+
+
+Absolutely—here’s a **tight, OSDI‑caliber evaluation plan** built around **three simple policies** that are trivial to implement in your 3‑callback framework, yet produce **clear, high‑signal results**. You’ll get publishable figures with a few hundred lines of code.
+
+---
+
+# Scope & Claims
+
+**Thesis:** With **Cluster Launch Control (CLC)** and *policy‑programmable cooperative drain*, you can (1) cut high‑priority response latency without sacrificing throughput, (2) regulate memory contention, and (3) keep fairness across tenants—**using only work‑when/stop‑when policies**, not invasive scheduling or new runtimes.
+
+**Core policies** (all plug into your 3‑callback interface):
+
+1. **ProbeEveryN_ExitOnFailure** – cooperative drain at tunable cadence (responsiveness vs. overhead)
+2. **LatencyBudgetPolicy** – bound per‑CTA time spent stealing for stable tail latency
+3. **TokenBucketPolicy** – rate‑limit steals to prevent DRAM/L2 thrash (bandwidth fairness)
+
+**Baselines:**
+
+* **Fixed Work per Thread Block** (small CTAs; good for priority at CTA boundaries)
+* **Fixed Number of Thread Blocks** (persistent CTAs; low overhead, poor priority behavior)
+* **Stream priority only** (no CLC)
+* *(Optional)* **MIG partition** (isolation upper bound)
+
+---
+
+# What you implement (small & safe)
+
+You already have the orchestrator. Add three policies:
+
+```cpp
+// 1) Cooperative drain, probe cadence
+struct ProbeEveryN_ExitOnFailure {
+  struct State { int iter=0; int N=2; };
+  __device__ static void init(State& s){ s.iter=0; }
+  __device__ static bool should_try_steal(State& s){ return (s.iter++ % s.N) == 0; }
+  __device__ static bool keep_going_after_success(int, State&){ return true; }
+};
+
+// 2) Time budget per CTA for stability
+struct LatencyBudgetPolicy {
+  struct State { unsigned long long t0; unsigned long long budget_ns; };
+  __device__ static void init(State& s){ s.t0 = clock64(); /* budget_ns pre-set */ }
+  __device__ static bool within(State& s){ return (clock64() - s.t0) <= s.budget_ns; }
+  __device__ static bool should_try_steal(State& s){ return within(s); }
+  __device__ static bool keep_going_after_success(int, State& s){ return within(s); }
+};
+
+// 3) Bandwidth fairness via rate limiting
+struct TokenBucketPolicy {
+  struct State { float tokens=0, rate_per_ns, burst; unsigned long long last; };
+  __device__ static void init(State& s){ s.last=clock64(); }
+  __device__ static bool refill(State& s){
+    auto now = clock64(); float dt=float(now - s.last); s.last=now;
+    s.tokens = fminf(s.burst, s.tokens + dt * s.rate_per_ns);
+    return s.tokens >= 1.f;
+  }
+  __device__ static bool should_try_steal(State& s){ return refill(s); }
+  __device__ static bool keep_going_after_success(int, State& s){ s.tokens-=1.f; return true; }
+};
+```
+
+Use them standalone or compose, e.g.:
+
+```cpp
+using LowOverheadDrain = ProbeEveryN_ExitOnFailure;          // N tunable
+using StableLatencyDrain = AndPolicy<ProbeEveryN_ExitOnFailure, LatencyBudgetPolicy>;
+using FairBWDrain       = AndPolicy<ProbeEveryN_ExitOnFailure, TokenBucketPolicy>;
+```
+
+---
+
+# Experimental Design (OSDI‑ready, but lightweight)
+
+You’ll get three strong, orthogonal results with **two microbenches** and **one end‑to‑end** setup.
+
+## Hardware/Software
+
+* **GPU:** Any **Blackwell (CC 10.0+)** part for CLC results; also run **Ampere/Hopper** to show *baseline* behaviors (no CLC path → clearly motivates CLC).
+* **CUDA:** recent toolkit with libcu++ PTX wrappers.
+* **Measurement:** CUDA events + NVTX; optionally CUPTI for mem BW.
+
+---
+
+## Micro A — **Priority response (H arrives late)**
+
+**Goal:** Measure how fast a late high‑priority kernel **H** starts/finishes while low‑priority kernel **L** is running.
+
+* **L (low priority stream):** Two variants
+
+  1. **Fixed Number of Blocks (persistent)** baseline (bad for priorities)
+  2. **Same kernel + CLC** with `ProbeEveryN` (N∈{1,2,4,8}) and `LatencyBudgetPolicy` (budget ∈ {50, 100, 200} µs)
+* **H (high priority stream):** short kernel (e.g., 4–16 CTAs, ~0.5–2 ms)
+
+**Metrics:**
+
+* **Response latency**: `t(H_end) - t(H_launch)` (ms)
+* **Drain latency** (optional): add a global `clock64()` stamp at H kernel prologue
+* **L throughput**: processed items/sec while H is present
+
+**Expected plots (clean, publishable):**
+
+* **CDF of H latency**: *FNB persistent* ≫ *FWB small CTAs* ≫ **CLC‑ProbeEveryN** (best)
+* **Latency vs N**: decreasing latency as N→1 (more probes), with minor overhead
+* **Throughput vs N**: nearly flat; small overhead for N=1
+
+**Why it’s strong:** One figure shows **stream priority alone is not preemption**, while **CLC cooperative drain** delivers near‑instant responsiveness without giving up throughput.
+
+---
+
+## Micro B — **Bandwidth fairness (contention)**
+
+**Goal:** Show **TokenBucketPolicy** prevents DRAM/L2 collapse when a memory‑bound L co‑runs with H.
+
+* **L:** memory‑bound kernel (e.g., streaming SAXPY/scale on a large vector)
+
+  * Variants: *FNB persistent*, **FNB+CLC+TokenBucket**, *FWB small CTAs*
+* **H:** small memory‑bound bursts every 10–50 ms (simulate latency‑sensitive tenant)
+
+**Metrics:**
+
+* **H effective bandwidth** or **H completion time** per burst
+* **L steady‑state throughput**
+* **Jain’s fairness index** across L/H bandwidths
+
+**Expected plots:**
+
+* **H bandwidth vs. time**: sawtooth/erratic in baseline → **stable** with TokenBucket
+* **Fairness bar chart**: +0.1–0.3 ↑ in Jain’s index with negligible L loss (properly tuned)
+
+**Why it’s strong:** Demonstrates **regulation** without heavyweight isolation (no MIG), with just a few lines of policy code.
+
+---
+
+## End‑to‑End — **Interactive inference under background load**
+
+**Goal:** Show that **StableLatencyDrain** keeps **p95/p99 latency** low while background throughput remains high.
+
+* **Workload:**
+
+  * **H:** Many short inference requests (e.g., synthetic per‑request tile) → one CTA per request, high‑priority stream
+  * **L:** Background batch job (compute or memory balanced), low‑priority stream
+* **Kernels:**
+
+  * Baselines: *FWB small CTAs*, *FNB persistent*, *FNB persistent + stream priority only*
+  * Treatment: **FNB+CLC+StableLatencyDrain (ProbeEveryN + Budget)**
+
+**Metrics:**
+
+* **p50/p95/p99 first‑result latency** for H (ms)
+* **H QPS** and **L throughput**
+* **Overhead**: extra cycles spent at CLC barriers (counter)
+
+**Expected plots:**
+
+* **Latency CDFs**: p99 drops sharply with **StableLatencyDrain** vs others
+* **Throughput table**: ≤2–5% overhead relative to FNB persistent
+
+**Why it’s strong:** Brings Micro A + Micro B into one realistic scenario with a single figure.
+
+---
+
+# Measurement harness (90% of the work done)
+
+## Host‑side pseudo‑code
+
+```cpp
+cudaDeviceGetStreamPriorityRange(&least, &greatest);
+cudaStream_t stL, stH;
+cudaStreamCreateWithPriority(&stL, cudaStreamNonBlocking, least);
+cudaStreamCreateWithPriority(&stH, cudaStreamNonBlocking, greatest);
+
+// Launch L (persistent) in stL
+kernel_L_baseline<<<B_persist, T, 0, stL>>>(...);
+// or: kernel_L_clc<ProbeEveryN>(...) or <StableLatencyDrain>(...);
+
+// Sleep or busy-wait on host for Δt (e.g., 50 ms)
+std::this_thread::sleep_for(50ms);
+
+// Time H
+cudaEvent_t hStart, hEnd;
+cudaEventCreate(&hStart); cudaEventCreate(&hEnd);
+cudaEventRecord(hStart, stH);
+kernel_H_short<<<B_H, T_H, 0, stH>>>(...);
+cudaEventRecord(hEnd, stH);
+cudaEventSynchronize(hEnd);
+float ms; cudaEventElapsedTime(&ms, hStart, hEnd); // response latency for H
+
+// Record L throughput over a window (bytes or items completed / window_time)
+```
+
+**Repeat** for each variant; log CSV.
+
+## L (CLC) kernel skeleton (CTA scope)
+
+```cpp
+template<class Policy, class Work>
+__global__ void L_clc_kernel(Work work, /* ... */) {
+#if __CUDA_ARCH__ >= 1000
+  __shared__ typename Policy::State S;
+  __shared__ uint4 result; __shared__ uint64_t bar;
+  __shared__ int go; int phase=0;
+  auto tb = cooperative_groups::this_thread_block();
+
+  if (tb.thread_rank()==0) { Policy::init(S); cuda::ptx::mbarrier_init(&bar,1); }
+  tb.sync();
+
+  int bx = blockIdx.x; // do your local tile first
+
+  while (true) {
+    tb.sync();
+    if (tb.thread_rank()==0) go = Policy::should_try_steal(S) ? 1 : 0;
+    tb.sync();
+    if (!go) break;
+
+    if (tb.thread_rank()==0) {
+      cuda::ptx::fence_proxy_async_generic_sync_restrict(cuda::ptx::sem_acquire,
+          cuda::ptx::space_shared, cuda::ptx::scope_cta);
+      cooperative_groups::invoke_one(cooperative_groups::coalesced_threads(),
+          cuda::ptx::clusterlaunchcontrol_try_cancel, &result, &bar);
+      cuda::ptx::mbarrier_arrive_expect_tx(cuda::ptx::sem_relaxed,
+          cuda::ptx::scope_cta, cuda::ptx::space_shared, &bar, sizeof(uint4));
+    }
+
+    work(bx); // do a small chunk while async cancel runs
+
+    while (!cuda::ptx::mbarrier_try_wait_parity(&bar, phase)) {}
+    phase ^= 1;
+
+    bool ok = cuda::ptx::clusterlaunchcontrol_query_cancel_is_canceled(result);
+    if (!ok) break; // cooperative drain: exit on failure
+
+    bx = cuda::ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x(result);
+
+    if (tb.thread_rank()==0) go = Policy::keep_going_after_success(bx, S) ? 1 : 0;
+    tb.sync();
+    cuda::ptx::fence_proxy_async_generic_sync_restrict(cuda::ptx::sem_release,
+        cuda::ptx::space_shared, cuda::ptx::scope_cta);
+    if (!go) break;
+  }
+#else
+  work(blockIdx.x); // fallback
+#endif
+}
+```
+
+*(Your existing orchestrator already encapsulates this; keep using it.)*
+
+---
+
+# Figures you can produce in a week
+
+1. **Fig 1 (Micro A):** CDF of H response latency for
+   **FNB‑persistent**, **FWB small CTAs**, **CLC‑ProbeEveryN (N=1,4,8)**
+   → *One curve dramatically left‑shifts with CLC; easy win.*
+
+2. **Fig 2 (Micro A):** Latency vs. probe cadence **N** & throughput vs **N**
+   → Trade‑off curve: N=1 best latency, N=4~8 near‑best with <2% overhead.
+
+3. **Fig 3 (Micro B):** H bandwidth over time (sparklines) w/ and w/o **TokenBucket**
+   → Stabilized H bandwidth; no large stalls; fairness bars (Jain’s index).
+
+4. **Fig 4 (End‑to‑End):** p50/p95/p99 latency bars for inference under load
+   **FNB**, **FWB**, **CLC‑StableLatencyDrain** → p99 improvement with similar QPS.
+
+5. **Table 1:** Overheads—CLC barriers (% of cycles), extra fences cost (<1–3%).
+   **Table 2:** Ablation—disable **ProbeEveryN** or **Budget** individually to show which drives which effect.
+
+---
+
+# Why this is OSDI‑grade (yet easy)
+
+* **Novelty:** CLC is new; demonstrating **policy‑programmable, cooperative drain** at block granularity is timely.
+* **Clarity:** The policies are minimal (dozens of lines), safe‑by‑construction, and map directly to intuitive goals.
+* **Rigor:** You compare against **both classic baselines** (FWB/FNB) and the **status‑quo mechanism** (stream priority).
+* **Breadth:** Latency, throughput, fairness, and bandwidth—three orthogonal axes.
+* **Ablations/Sensitivities:** Probe cadence (N), budget, and bucket rates expose mechanisms, not just outcomes.
+* **Repro:** Single header (`clc_sched.cuh`), one driver, CSV log, plotting scripts.
+
+---
+
+# Checklist to ship
+
+* [ ] Implement the three policies above (+ 10‑line `AndPolicy` you already have)
+* [ ] Two kernels: `L` (persistent or CLC) and `H` (short)
+* [ ] Harness: two streams (priority), CUDA events, CSV logging
+* [ ] Scripts: sweep `N`, `budget_ns`, `rate_per_ns`
+* [ ] Plots: CDFs, trade‑offs, fairness, overheads
+* [ ] Artifact README: driver command lines, seeds, GPU model, CUDA version
+
+---
+
+## Threats to validity (address in paper)
+
+* **Requires CC 10.0+ for CLC** (run baselines on older GPUs; full results on Blackwell).
+* **Synthetic H/L kernels**: include at least one end‑to‑end style workload to corroborate micro results.
+* **Stream priority config**: verify `cudaDeviceGetStreamPriorityRange` and show the exact priorities used.
+* **Work chunk size**: report the chunking of `work(bx)`; sensitivity analysis in appendix.
+
+---
+
+**Bottom line:**
+Adopt **ProbeEveryN_ExitOnFailure** for the headline “preemption‑like” result, **LatencyBudgetPolicy** for p99 stability, and **TokenBucketPolicy** for bandwidth fairness. These three are **easy to implement, easy to evaluate**, and will give you **crisp, convincing figures** that are right at home in an OSDI paper.
