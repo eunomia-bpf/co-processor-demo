@@ -144,3 +144,5 @@ data/hotspot3D/temp_4096x16
 nvbit_release/
 trace/
 *_trace
+*.log
+*.log.new

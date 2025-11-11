@@ -13,7 +13,7 @@ INCLUDES := -I. -I$(CUDA_INSTALL_PATH)include
 LIB_CUDA := -L/usr/lib/nvidia-current -lcuda
 
 # Options
-NVCCOPTIONS := -std=c++11  -Wno-deprecated-gpu-targets
+NVCCOPTIONS := -std=c++11  -Wno-deprecated-gpu-targets --no-device-link -arch=sm_90
 CXXOPTIONS = -std=c++11 -O2
 
 COMMONFLAGS += $(INCLUDES) 
@@ -22,7 +22,7 @@ CXXFLAGS += $(COMMONFLAGS) $(CXXOPTIONS)
 CFLAGS += $(COMMONFLAGS)
 TARGET = main
 OBJS =  graph.c.o bfsCPU.c.o main.cu.o bfsCUDA.cu.o
-LINKLINE = $(LINK) -o $(TARGET) $(OBJS) $(LIB_CUDA)
+LINKLINE = $(LINK) --no-device-link -arch=sm_90 -o $(TARGET) $(OBJS) $(LIB_CUDA)
 
 
 

@@ -86,7 +86,7 @@ else
       TARGET := release
 endif
 
-ALL_CCFLAGS :=
+ALL_CCFLAGS :=--no-device-link
 ALL_CCFLAGS += $(NVCCFLAGS)
 ALL_CCFLAGS += $(addprefix -Xcompiler ,$(CCFLAGS))
 ALL_CCFLAGS += $(EXTRA_NVCCFLAGS)

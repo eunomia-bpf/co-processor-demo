@@ -10,7 +10,7 @@
 *.so
 *.so.*
 *.dylib
-
+*.fatbin
 # Executables
 *.exe
 *.out

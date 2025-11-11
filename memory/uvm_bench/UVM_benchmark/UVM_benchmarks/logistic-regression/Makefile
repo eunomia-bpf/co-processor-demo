@@ -11,8 +11,8 @@ CFLAGS = -Ofast -march=native -mtune=native -std=c++11
 OBJECTS = Helper.o ArffImporter.o
 
 # Enable Nvidia gpu
-NVCC = /usr/local/cuda/bin/nvcc
-NVCCCFLAGS =  -std=c++11 -use_fast_math -lcublas# -lcublas_device -rdc=true -lcudadevrt
+NVCC = /usr/local/cuda-12.9/bin/nvcc
+NVCCCFLAGS =  -std=c++11 -use_fast_math --no-device-link -arch=sm_90 -I/usr/local/cuda-12.9/targets/x86_64-linux/include -L/usr/local/cuda-12.9/targets/x86_64-linux/lib -lcublas# -lcublas_device -rdc=true -lcudadevrt
 
 ################################ Compile ################################
 
