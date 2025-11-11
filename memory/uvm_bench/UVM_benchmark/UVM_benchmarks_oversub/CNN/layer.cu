@@ -59,7 +59,9 @@ Layer::~Layer() {
 void Layer::setOutput(float *data) {
   // cudaMemcpy(output, data, sizeof(float) * O, cudaMemcpyHostToDevice);
   memcpy(output, data, sizeof(float) * O); //TODO May change to prefetch
-  // cudaMemPrefetchAsync(output,sizeof(float) * O,  0, stream );
+  // CUDA 13.0 API: cudaMemPrefetchAsync now takes cudaMemLocation struct
+  cudaMemLocation loc = {cudaMemLocationTypeDevice, 0};
+  cudaMemPrefetchAsync(output, sizeof(float) * O, loc, 0, stream);
 
 }
 

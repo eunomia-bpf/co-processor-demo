@@ -1,0 +1,426 @@
+cd UVM_benchmarks; make;
+make[1]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks'
+cd bfs;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/bfs'
+/usr/bin/g++ -I. -I/usr/local/cuda/include  -std=c++11 -O2 -c graph.cpp -o graph.c.o
+graph.cpp: In function ‘void readGraph(Graph&, int, char**)’:
+graph.cpp:11:14: warning: ignoring return value of ‘int scanf(const char*, ...)’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   11 |         scanf("%d %d", &n, &m);
+      |         ~~~~~^~~~~~~~~~~~~~~~~
+graph.cpp:22:18: warning: ignoring return value of ‘int scanf(const char*, ...)’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   22 |             scanf("%d %d", &u, &v);
+      |             ~~~~~^~~~~~~~~~~~~~~~~
+/usr/bin/g++ -I. -I/usr/local/cuda/include  -std=c++11 -O2 -c bfsCPU.cpp -o bfsCPU.c.o
+make[2]: Circular main.cu <- main.cu.o dependency dropped.
+/usr/local/cuda/bin/nvcc -ccbin gcc -std=c++11  -Wno-deprecated-gpu-targets  -I. -I/usr/local/cuda/include   -c main.cu -o main.cu.o
+make[2]: Circular bfsCUDA.cu <- bfsCUDA.cu.o dependency dropped.
+/usr/local/cuda/bin/nvcc -ccbin gcc -std=c++11  -Wno-deprecated-gpu-targets  -I. -I/usr/local/cuda/include   -c bfsCUDA.cu -o bfsCUDA.cu.o
+/usr/local/cuda/bin/nvcc -ccbin gcc -o main graph.c.o bfsCPU.c.o main.cu.o bfsCUDA.cu.o -L/usr/lib/nvidia-current -lcuda
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/bfs'
+cd BN;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/BN'
+"/usr/local/cuda"/bin/nvcc -ccbin g++ -I../../common/inc -m64 -Xcompiler -Wno-narrowing -gencode arch=compute_90,code=sm_90 -o ordergraph.o -c ordergraph.cu
+ordergraph.cu(21): warning #2364-D: invalid narrowing conversion from "int" to "float": constant value cannot be represented exactly in destination type
+  float maxScore[HIGHEST] = {-999999999};
+                             ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ordergraph.cu(21): warning #2364-D: invalid narrowing conversion from "int" to "float": constant value cannot be represented exactly in destination type
+  float maxScore[HIGHEST] = {-999999999};
+                             ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+"/usr/local/cuda"/bin/nvcc -ccbin g++ -m64 -Xcompiler -Wno-narrowing -o ordergraph ordergraph.o 
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/BN'
+cd CNN; make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/CNN'
+/usr/local/cuda/bin/nvcc -lcuda -lcublas *.cu -o CNN
+layer.cu(62): error: no suitable constructor exists to convert from "int" to "cudaMemLocation"
+    cudaMemPrefetchAsync(output, sizeof(float) * O, 0, 0);
+                                                    ^
+
+1 error detected in the compilation of "layer.cu".
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/CNN'
+cd kmeans;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/kmeans'
+/usr/local/cuda/bin/nvcc -std=c++11 kmeans_cuda.cu -o kmeans_cuda
+/usr/local/cuda/bin/nvcc -std=c++11 standard_kmeans.cu -o kmeans_standard
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/kmeans'
+cd knn;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/knn'
+/usr/local/cuda/bin/nvcc -std=c++11 -lcuda -O0 -o knn knn_cuda.cu
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/knn'
+cd logistic-regression; make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/logistic-regression'
+g++ -Ofast -march=native -mtune=native -std=c++11 -c Helper.c
+/usr/local/cuda/bin/nvcc -std=c++11 -use_fast_math -lcublas -c ArffImporter.cu
+/usr/local/cuda/bin/nvcc -std=c++11 -use_fast_math -lcublas -o gpu_exec Helper.o ArffImporter.o LogisticRegression_CuBLAS.cu
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/logistic-regression'
+cd SVM;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/SVM'
+/usr/local/cuda/bin/nvcc -std=c++11 -lcuda  -arch=sm_61 -rdc=true *.cu -o svm_uvm
+nvcc fatal   : Unsupported gpu architecture 'sm_61'
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/SVM'
+cd rodinia/backprop;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/backprop'
+gcc -g  -O2 -I/usr/local/cuda/include backprop.c -c
+backprop.c:102:1: warning: return type defaults to ‘int’ [-Wimplicit-int]
+  102 | bpnn_randomize_weights(float **w, int m, int n)
+      | ^~~~~~~~~~~~~~~~~~~~~~
+backprop.c:114:1: warning: return type defaults to ‘int’ [-Wimplicit-int]
+  114 | bpnn_randomize_row(float *w, int m)
+      | ^~~~~~~~~~~~~~~~~~
+backprop.c:124:1: warning: return type defaults to ‘int’ [-Wimplicit-int]
+  124 | bpnn_zero_weights(float **w, int m,  int n)
+      | ^~~~~~~~~~~~~~~~~
+backprop.c: In function ‘bpnn_initialize’:
+backprop.c:136:6: warning: type of ‘seed’ defaults to ‘int’ [-Wimplicit-int]
+  136 | void bpnn_initialize(seed)
+      |      ^~~~~~~~~~~~~~~
+backprop.c: In function ‘bpnn_adjust_weights’:
+backprop.c:320:17: warning: comparison between pointer and integer
+  320 |   for (j = 1; j <= ndelta; j++) {
+      |                 ^~
+backprop.c:321:19: warning: comparison between pointer and integer
+  321 |     for (k = 0; k <= nly; k++) {
+      |                   ^~
+backprop.c: In function ‘bpnn_train’:
+backprop.c:371:42: warning: passing argument 2 of ‘bpnn_adjust_weights’ makes pointer from integer without a cast [-Wint-conversion]
+  371 |   bpnn_adjust_weights(net->output_delta, out, net->hidden_units, hid,
+      |                                          ^~~
+      |                                          |
+      |                                          int
+backprop.c:304:47: note: expected ‘float *’ but argument is of type ‘int’
+  304 | void bpnn_adjust_weights(float *delta, float *ndelta, float *ly, float *nly, float **w, float **oldw)
+      |                                        ~~~~~~~^~~~~~
+backprop.c:371:66: warning: passing argument 4 of ‘bpnn_adjust_weights’ makes pointer from integer without a cast [-Wint-conversion]
+  371 |   bpnn_adjust_weights(net->output_delta, out, net->hidden_units, hid,
+      |                                                                  ^~~
+      |                                                                  |
+      |                                                                  int
+backprop.c:304:73: note: expected ‘float *’ but argument is of type ‘int’
+  304 | void bpnn_adjust_weights(float *delta, float *ndelta, float *ly, float *nly, float **w, float **oldw)
+      |                                                                  ~~~~~~~^~~
+backprop.c:373:42: warning: passing argument 2 of ‘bpnn_adjust_weights’ makes pointer from integer without a cast [-Wint-conversion]
+  373 |   bpnn_adjust_weights(net->hidden_delta, hid, net->input_units, in,
+      |                                          ^~~
+      |                                          |
+      |                                          int
+backprop.c:304:47: note: expected ‘float *’ but argument is of type ‘int’
+  304 | void bpnn_adjust_weights(float *delta, float *ndelta, float *ly, float *nly, float **w, float **oldw)
+      |                                        ~~~~~~~^~~~~~
+backprop.c:373:65: warning: passing argument 4 of ‘bpnn_adjust_weights’ makes pointer from integer without a cast [-Wint-conversion]
+  373 |   bpnn_adjust_weights(net->hidden_delta, hid, net->input_units, in,
+      |                                                                 ^~
+      |                                                                 |
+      |                                                                 int
+backprop.c:304:73: note: expected ‘float *’ but argument is of type ‘int’
+  304 | void bpnn_adjust_weights(float *delta, float *ndelta, float *ly, float *nly, float **w, float **oldw)
+      |                                                                  ~~~~~~~^~~
+backprop.c: In function ‘bpnn_read’:
+backprop.c:450:13: warning: implicit declaration of function ‘open’; did you mean ‘popen’? [-Wimplicit-function-declaration]
+  450 |   if ((fd = open(filename, 0, 0644)) == -1) {
+      |             ^~~~
+      |             popen
+backprop.c:456:3: warning: implicit declaration of function ‘read’; did you mean ‘fread’? [-Wimplicit-function-declaration]
+  456 |   read(fd, (char *) &n1, sizeof(int));
+      |   ^~~~
+      |   fread
+backprop.c:487:3: warning: implicit declaration of function ‘close’; did you mean ‘pclose’? [-Wimplicit-function-declaration]
+  487 |   close(fd);
+      |   ^~~~~
+      |   pclose
+gcc -g  -O2 -I/usr/local/cuda/include facetrain.c -c
+facetrain.c:14:1: warning: return type defaults to ‘int’ [-Wimplicit-int]
+   14 | backprop_face()
+      | ^~~~~~~~~~~~~
+facetrain.c: In function ‘backprop_face’:
+facetrain.c:22:3: warning: implicit declaration of function ‘load’ [-Wimplicit-function-declaration]
+   22 |   load(net);
+      |   ^~~~
+facetrain.c:25:5: warning: implicit declaration of function ‘bpnn_train_cuda’; did you mean ‘bpnn_train’? [-Wimplicit-function-declaration]
+   25 |     bpnn_train_cuda(net, &out_err, &hid_err);
+      |     ^~~~~~~~~~~~~~~
+      |     bpnn_train
+gcc -g  -O2 -I/usr/local/cuda/include imagenet.c -c
+imagenet.c:6:8: warning: type defaults to ‘int’ in declaration of ‘layer_size’ [-Wimplicit-int]
+    6 | extern layer_size;
+      |        ^~~~~~~~~~
+imagenet.c:8:1: warning: return type defaults to ‘int’ [-Wimplicit-int]
+    8 | load(net)
+      | ^~~~
+/usr/local/cuda/bin/nvcc -I/usr/local/cuda/include -O2 -c backprop_cuda.cu 
+backprop_cuda.cu(74): warning #177-D: variable "partial_sum" was declared but never referenced
+    float *partial_sum;
+           ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+backprop_cuda.cu(79): warning #177-D: variable "input_weights_one_dim" was declared but never referenced
+    float *input_weights_one_dim;
+           ^
+
+backprop_cuda.cu(80): warning #177-D: variable "input_weights_prev_one_dim" was declared but never referenced
+    float *input_weights_prev_one_dim;
+           ^
+
+gcc -g  -O2 -I/usr/local/cuda/include backprop.o facetrain.o imagenet.o backprop_cuda.o -o backprop -L/usr/local/cuda/lib64  -lcudart -lm 
+mold: error: undefined symbol: __cxa_guard_acquire
+>>> referenced by tmpxft_0003a82f_00000000-6_backprop_cuda.cudafe1.cpp
+>>>               backprop_cuda.o:(__device_stub__Z22bpnn_layerforward_CUDAPfS_S_S_ii(float*, float*, float*, float*, int, int))>>> referenced by tmpxft_0003a82f_00000000-6_backprop_cuda.cudafe1.cpp
+>>>               backprop_cuda.o:(__device_stub__Z24bpnn_adjust_weights_cudaPfiS_iS_S_(float*, int, float*, int, float*, float*))
+mold: error: undefined symbol: __gxx_personality_v0
+>>> referenced by tmpxft_0003a82f_00000000-6_backprop_cuda.cudafe1.cpp
+>>>               backprop_cuda.o
+mold: error: undefined symbol: __cxa_guard_abort
+>>> referenced by tmpxft_0003a82f_00000000-6_backprop_cuda.cudafe1.cpp
+>>>               backprop_cuda.o:(__device_stub__Z22bpnn_layerforward_CUDAPfS_S_S_ii(float*, float*, float*, float*, int, int) [clone .cold])>>> referenced by tmpxft_0003a82f_00000000-6_backprop_cuda.cudafe1.cpp
+>>>               backprop_cuda.o:(__device_stub__Z24bpnn_adjust_weights_cudaPfiS_iS_S_(float*, int, float*, int, float*, float*) [clone .cold])
+mold: error: undefined symbol: __cxa_guard_release
+>>> referenced by tmpxft_0003a82f_00000000-6_backprop_cuda.cudafe1.cpp
+>>>               backprop_cuda.o:(__device_stub__Z22bpnn_layerforward_CUDAPfS_S_S_ii(float*, float*, float*, float*, int, int))>>> referenced by tmpxft_0003a82f_00000000-6_backprop_cuda.cudafe1.cpp
+>>>               backprop_cuda.o:(__device_stub__Z24bpnn_adjust_weights_cudaPfiS_iS_S_(float*, int, float*, int, float*, float*))
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/backprop'
+cd rodinia/dwt2d;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/dwt2d'
+/usr/local/cuda/bin/nvcc -DOUTPUT -I. -I/include  -O2  --compiler-options -fno-strict-aliasing -c main.cu -o main.cu.o
+main.cu(54): warning #2464-D: conversion from a string literal to "char *" is deprecated
+    char *path = "../../../data/dwt2d/";
+                 ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+main.cu(54): warning #2464-D: conversion from a string literal to "char *" is deprecated
+    char *path = "../../../data/dwt2d/";
+                 ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/usr/local/cuda/bin/nvcc -DOUTPUT -I. -I/include  -O2  --compiler-options -fno-strict-aliasing -c dwt.cu -o dwt.cu.o
+dwt.cu(81): warning #177-D: variable "size" was declared but never referenced
+      const int size = pixHeight * pixWidth * sizeof(T);
+                ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+dwt.cu(190): warning #177-D: variable "gpu_output" was declared but never referenced
+      T *gpu_output;
+         ^
+
+dwt.cu(247): warning #177-D: variable "src" was declared but never referenced
+      T *src, *dst;
+         ^
+
+/usr/local/cuda/bin/nvcc -DOUTPUT -I. -I/include  -O2  --compiler-options -fno-strict-aliasing -c components.cu -o components.cu.o
+/usr/local/cuda/bin/nvcc -DOUTPUT -I. -I/include  -O2  --compiler-options -fno-strict-aliasing -c dwt_cuda/fdwt53.cu -o dwt_cuda/fdwt53.cu.o
+/usr/local/cuda/bin/nvcc -DOUTPUT -I. -I/include  -O2  --compiler-options -fno-strict-aliasing -c dwt_cuda/fdwt97.cu -o dwt_cuda/fdwt97.cu.o
+/usr/local/cuda/bin/nvcc -DOUTPUT -I. -I/include  -O2  --compiler-options -fno-strict-aliasing -c dwt_cuda/common.cu -o dwt_cuda/common.cu.o
+/usr/local/cuda/bin/nvcc -DOUTPUT -I. -I/include  -O2  --compiler-options -fno-strict-aliasing -c dwt_cuda/rdwt97.cu -o dwt_cuda/rdwt97.cu.o
+/usr/local/cuda/bin/nvcc -DOUTPUT -I. -I/include  -O2  --compiler-options -fno-strict-aliasing -c dwt_cuda/rdwt53.cu -o dwt_cuda/rdwt53.cu.o
+g++ -fPIC -o dwt2d   main.cu.o dwt.cu.o components.cu.o dwt_cuda/fdwt53.cu.o dwt_cuda/fdwt97.cu.o dwt_cuda/common.cu.o dwt_cuda/rdwt97.cu.o dwt_cuda/rdwt53.cu.o -L/usr/local/cuda/lib64 -lcudart
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/dwt2d'
+cd rodinia/gaussian;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/gaussian'
+/usr/local/cuda/bin/nvcc  gaussian.cu -o gaussian -I/usr/local/cuda/include -L/usr/local/cuda/lib64 
+gaussian.cu(234): error: class "cudaDeviceProp" has no member "clockRate"
+        printf("\nClock rate \t\t\t\t - %d KHz", deviceProp.clockRate);
+                                                            ^
+
+gaussian.cu(238): error: class "cudaDeviceProp" has no member "deviceOverlap"
+               deviceProp.deviceOverlap ? "Allowed" : "Not Allowed");
+                          ^
+
+2 errors detected in the compilation of "gaussian.cu".
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/gaussian'
+cd rodinia/hotspot; make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/hotspot'
+/usr/local/cuda/bin/nvcc  hotspot.cu -o hotspot -I/usr/local/cuda/include -L/usr/local/cuda/lib64  
+hotspot.cu(77): warning #2464-D: conversion from a string literal to "char *" is deprecated
+          fatal("not enough lines in file");
+                ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+hotspot.cu(81): warning #2464-D: conversion from a string literal to "char *" is deprecated
+          fatal("invalid file format");
+                ^
+
+hotspot.cu(373): warning #2464-D: conversion from a string literal to "char *" is deprecated
+      fatal("unable to allocate memory");
+            ^
+
+hotspot.cu(77): warning #2464-D: conversion from a string literal to "char *" is deprecated
+          fatal("not enough lines in file");
+                ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+hotspot.cu(81): warning #2464-D: conversion from a string literal to "char *" is deprecated
+          fatal("invalid file format");
+                ^
+
+hotspot.cu(373): warning #2464-D: conversion from a string literal to "char *" is deprecated
+      fatal("unable to allocate memory");
+            ^
+
+hotspot.cu(335): warning #177-D: variable "FilesavingTemp" was declared but never referenced
+    float *FilesavingTemp, *FilesavingPower, *MatrixOut;
+           ^
+
+hotspot.cu(335): warning #177-D: variable "FilesavingPower" was declared but never referenced
+    float *FilesavingTemp, *FilesavingPower, *MatrixOut;
+                            ^
+
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/hotspot'
+cd rodinia/hotspot3D;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/hotspot3D'
+/usr/local/cuda/bin/nvcc  -g -G  3D.cu -o 3D  -I/usr/local/cuda/include -L/usr/local/cuda/lib64 
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/hotspot3D'
+cd rodinia/nn;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/nn'
+/usr/local/cuda/bin/nvcc -cuda nn_cuda.cu
+/usr/local/cuda/bin/nvcc -o nn nn_cuda.cu
+gcc -g -O3 -Wall -o hurricane_gen hurricane_gen.c -lm
+hurricane_gen.c: In function ‘main’:
+hurricane_gen.c:32:30: warning: ‘%d’ directive writing between 1 and 10 bytes into a region of size 7 [-Wformat-overflow=]
+   32 |     sprintf(fname, "data/cane%d_%d.db", num_files,j);
+      |                              ^~
+hurricane_gen.c:32:20: note: directive argument in the range [1, 2147483647]
+   32 |     sprintf(fname, "data/cane%d_%d.db", num_files,j);
+      |                    ^~~~~~~~~~~~~~~~~~~
+hurricane_gen.c:32:20: note: directive argument in the range [0, 2147483646]
+In file included from /usr/include/stdio.h:980,
+                 from hurricane_gen.c:1:
+In function ‘sprintf’,
+    inlined from ‘main’ at hurricane_gen.c:32:5:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:30:10: note: ‘__builtin___sprintf_chk’ output between 16 and 34 bytes into a destination of size 16
+   30 |   return __builtin___sprintf_chk (__s, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   31 |                                   __glibc_objsize (__s), __fmt,
+      |                                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   32 |                                   __va_arg_pack ());
+      |                                   ~~~~~~~~~~~~~~~~~
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/nn'
+cd rodinia/nw;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/nw'
+/usr/local/cuda/bin/nvcc  needle.cu -o needle -I/usr/local/cuda/include -L/usr/local/cuda/lib64 
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/nw'
+cd rodinia/particlefilter; make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/particlefilter'
+/usr/local/cuda/bin/nvcc -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -lcuda -g -lm -O3 -use_fast_math ex_particle_CUDA_naive_seq.cu -o particlefilter_naive
+ex_particle_CUDA_naive_seq.cu(631): warning #2464-D: conversion from a string literal to "char *" is deprecated
+   char* usage = "naive.out -x <dimX> -y <dimY> -z <Nfr> -np <Nparticles>";
+                 ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ex_particle_CUDA_naive_seq.cu(631): warning #2464-D: conversion from a string literal to "char *" is deprecated
+   char* usage = "naive.out -x <dimX> -y <dimY> -z <Nfr> -np <Nparticles>";
+                 ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+/usr/local/cuda/bin/nvcc -I/usr/local/cuda/include -L/usr/local/cuda/lib64 -lcuda -g -lm -O3 -use_fast_math ex_particle_CUDA_float_seq.cu -o particlefilter_float
+ex_particle_CUDA_float_seq.cu(806): warning #2464-D: conversion from a string literal to "char *" is deprecated
+      char* usage = "double.out -x <dimX> -y <dimY> -z <Nfr> -np <Nparticles>";
+                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ex_particle_CUDA_float_seq.cu(806): warning #2464-D: conversion from a string literal to "char *" is deprecated
+      char* usage = "double.out -x <dimX> -y <dimY> -z <Nfr> -np <Nparticles>";
+                    ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+ex_particle_CUDA_float_seq.cu: In function ‘void cuda_print_double_array(double*, size_t)’:
+ex_particle_CUDA_float_seq.cu:67:8: warning: format ‘%d’ expects argument of type ‘int’, but argument 2 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+   67 |         printf("[%d]:%0.6f\n", i, mem[i]);
+      |        ^~~~~~~~~~~~~~  ~
+      |                        |
+      |                        size_t {aka long unsigned int}
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/particlefilter'
+cd rodinia/pathfinder;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/pathfinder'
+/usr/local/cuda/bin/nvcc pathfinder.cu -o pathfinder -I/usr/local/cuda/include -L/usr/local/cuda/lib64 
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/pathfinder'
+cd rodinia/srad;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/srad'
+/usr/local/cuda/bin/nvcc  srad.cu -o srad -I/usr/local/cuda/include -L/usr/local/cuda/lib64 
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/srad'
+cd rodinia/streamcluster; make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/streamcluster'
+/usr/local/cuda/bin/nvcc -I/usr/local/cuda/include -O3  streamcluster_cuda_cpu.cu streamcluster_cuda.cu streamcluster_header.cu -o sc_gpu -lcuda
+streamcluster_cuda_cpu.cu(177): warning #550-D: variable "open" was set but never used
+    static bool open = false;
+                ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+streamcluster_cuda_cpu.cu(327): warning #550-D: variable "numberOfPoints" was set but never used
+    long numberOfPoints;
+         ^
+
+streamcluster_cuda_cpu.cu(450): warning #550-D: variable "lastcost" was set but never used
+    float lastcost;
+          ^
+
+streamcluster_cuda_cpu.cu(460): warning #177-D: variable "numberOfPoints" was declared but never referenced
+    long numberOfPoints = points->num;
+         ^
+
+streamcluster_cuda_cpu.cu(84): warning #177-D: function "floatcomp" was declared but never referenced
+  static int floatcomp(const void *i, const void *j)
+             ^
+
+streamcluster_cuda_cpu.cu: In function ‘void outcenterIDs(Points*, long int*, char*)’:
+streamcluster_cuda_cpu.cu:750:13: warning: format ‘%u’ expects argument of type ‘unsigned int’, but argument 3 has type ‘long int’ [-Wformat=]
+  750 |       fprintf(fp, "%u\n", centerIDs[i]);
+      |             ^~~~~~  ~~~~~~~~~~~~
+      |                                |
+      |                                long int
+streamcluster_cuda_cpu.cu: In function ‘void streamCluster(PStream*, long int, long int, int, long int, long int, char*)’:
+streamcluster_cuda_cpu.cu:799:17: warning: format ‘%d’ expects argument of type ‘int’, but argument 3 has type ‘size_t’ {aka ‘long unsigned int’} [-Wformat=]
+  799 |     fprintf(stderr,"read %d points\n",numRead);
+      |                 ^~~~~~~~~~~~~~~~~~  ~~~~~~~
+      |                                     |
+      |                                     size_t {aka long unsigned int}
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks/rodinia/streamcluster'
+make[1]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/UVM_benchmarks'
+cd non_UVM_benchmarks; make;
+make[1]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/non_UVM_benchmarks'
+cd bfs;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/non_UVM_benchmarks/bfs'
+/usr/bin/g++ -I. -I/usr/local/cuda/include  -std=c++11 -O2 -c graph.cpp -o graph.c.o
+graph.cpp: In function ‘void readGraph(Graph&, int, char**)’:
+graph.cpp:13:14: warning: ignoring return value of ‘int scanf(const char*, ...)’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   13 |         scanf("%d %d", &n, &m);
+      |         ~~~~~^~~~~~~~~~~~~~~~~
+graph.cpp:28:18: warning: ignoring return value of ‘int scanf(const char*, ...)’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   28 |             scanf("%d %d", &u, &v);
+      |             ~~~~~^~~~~~~~~~~~~~~~~
+/usr/bin/g++ -I. -I/usr/local/cuda/include  -std=c++11 -O2 -c bfsCPU.cpp -o bfsCPU.c.o
+make[2]: Circular main.cu <- main.cu.o dependency dropped.
+/usr/local/cuda/bin/nvcc -ccbin gcc -std=c++11  -Wno-deprecated-gpu-targets  -I. -I/usr/local/cuda/include   -c main.cu -o main.cu.o
+make[2]: Circular bfsCUDA.cu <- bfsCUDA.cu.o dependency dropped.
+/usr/local/cuda/bin/nvcc -ccbin gcc -std=c++11  -Wno-deprecated-gpu-targets  -I. -I/usr/local/cuda/include   -c bfsCUDA.cu -o bfsCUDA.cu.o
+/usr/local/cuda/bin/nvcc -ccbin gcc -o main graph.c.o bfsCPU.c.o main.cu.o bfsCUDA.cu.o -L/usr/lib/nvidia-current -lcuda
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/non_UVM_benchmarks/bfs'
+cd BN;	make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/non_UVM_benchmarks/BN'
+"/usr/local/cuda"/bin/nvcc -ccbin g++ -I../../common/inc -m64 -Xcompiler -Wno-narrowing -gencode arch=compute_30,code=sm_30 -gencode arch=compute_35,code=\"sm_35,compute_35\" -o ordergraph.o -c ordergraph.cu
+nvcc fatal   : 'compute_35' is not in 'keyword=value' format
+"/usr/local/cuda"/bin/nvcc -ccbin g++ -m64 -Xcompiler -Wno-narrowing -o ordergraph ordergraph.o 
+nvlink fatal   : Could not open input file 'ordergraph.o'
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/non_UVM_benchmarks/BN'
+cd CNN; make;
+make[2]: Entering directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/non_UVM_benchmarks/CNN'
+nvcc -lcuda -lcublas *.cu -o CNN   -Wno-deprecated-gpu-targets
+/bin/sh: 1: nvcc: not found
+make[2]: *** [Makefile:2: all] Error 127
+make[2]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/non_UVM_benchmarks/CNN'
+make[1]: *** [Makefile:4: all] Error 2
+make[1]: Leaving directory '/root/co-processor-demo/memory/uvm_bench/UVM_benchmark/non_UVM_benchmarks'
+make: *** [Makefile:3: all] Error 2
