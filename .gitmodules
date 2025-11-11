@@ -4,3 +4,6 @@
 [submodule "external/spdk"]
 	path = external/spdk
 	url = https://github.com/spdk/spdk.git
+[submodule "uvm_bench/UVM_benchmark"]
+	path = uvm_bench/UVM_benchmark
+	url = https://github.com/eunomia-bpf/UVM_benchmark
