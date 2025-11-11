@@ -1,0 +1,1 @@
+./hotspot 16384 2 2 ../../../data/hotspot/temp_16384 ../../../data/hotspot/power_16384 output.out
