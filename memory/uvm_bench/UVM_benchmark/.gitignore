@@ -146,3 +146,39 @@ trace/
 *_trace
 *.log
 *.log.new
+
+# Generated executables
+**/knn
+**/knn_working
+**/knn_test
+**/main
+**/*.exe
+**/*.o
+**/ordergraph
+**/backprop
+**/hotspot
+**/hotspot3D
+**/gaussian
+**/nn
+**/nw
+**/pathfinder
+**/particlefilter
+**/srad
+**/streamcluster
+**/dwt2d
+
+# Generated data
+data/kmeans/*.txt
+data/bfs/inputGen/graph*.txt
+
+# Results
+results/
+simple_results/
+*.log
+*.csv
+*.json
+*.txt
+
+# Temp files
+*.asm
+*.cu.broken

@@ -1,0 +1,54 @@
+# Executable
+multi_stream_bench
+
+# Object files
+*.o
+*.obj
+
+# CUDA compiled files
+*.cubin
+*.ptx
+*.fatbin
+
+# Build artifacts
+*.exe
+*.out
+*.app
+
+# Profiling and debugging
+*.nvprof
+*.qdrep
+*.sqlite
+nsight-*
+*.ncu-rep
+
+# Core dumps
+core
+core.*
+
+# Editor temporary files
+*~
+*.swp
+*.swo
+.*.swp
+.*.swo
+
+# IDE specific
+.vscode/
+.idea/
+*.suo
+*.user
+*.ncb
+*.sdf
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Results and data
+results/
+*.csv
+!.gitkeep

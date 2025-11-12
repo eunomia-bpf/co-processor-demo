@@ -1,0 +1,584 @@
+#include <cuda_runtime.h>
+#include <cuda_profiler_api.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cmath>
+#include <getopt.h>
+#include <vector>
+#include <algorithm>
+#include <memory>
+#include <functional>
+
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) { \
+            fprintf(stderr, "CUDA error at %s:%d - %s\n", __FILE__, __LINE__, \
+                    cudaGetErrorString(err)); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while(0)
+
+// RAII wrappers for CUDA resources
+struct CudaDeleter {
+    void operator()(void* ptr) const {
+        if (ptr) cudaFree(ptr);
+    }
+};
+
+struct CudaEventDeleter {
+    void operator()(cudaEvent_t* event) const {
+        if (event) {
+            cudaEventDestroy(*event);
+            delete event;
+        }
+    }
+};
+
+struct CudaStreamDeleter {
+    void operator()(cudaStream_t* stream) const {
+        if (stream) {
+            cudaStreamDestroy(*stream);
+            delete stream;
+        }
+    }
+};
+
+template<typename T>
+using cuda_unique_ptr = std::unique_ptr<T, CudaDeleter>;
+
+using cuda_event_ptr = std::unique_ptr<cudaEvent_t, CudaEventDeleter>;
+using cuda_stream_ptr = std::unique_ptr<cudaStream_t, CudaStreamDeleter>;
+
+// Helper to create CUDA device memory
+template<typename T>
+cuda_unique_ptr<T> make_cuda_memory(size_t count) {
+    T* ptr = nullptr;
+    CUDA_CHECK(cudaMalloc(&ptr, count * sizeof(T)));
+    return cuda_unique_ptr<T>(ptr);
+}
+
+// Helper to create CUDA event
+cuda_event_ptr make_cuda_event() {
+    cudaEvent_t* event = new cudaEvent_t;
+    CUDA_CHECK(cudaEventCreate(event));
+    return cuda_event_ptr(event);
+}
+
+// Helper to create CUDA stream
+cuda_stream_ptr make_cuda_stream(int priority = 0, bool use_priority = false) {
+    cudaStream_t* stream = new cudaStream_t;
+    if (use_priority) {
+        CUDA_CHECK(cudaStreamCreateWithPriority(stream, cudaStreamDefault, priority));
+    } else {
+        CUDA_CHECK(cudaStreamCreate(stream));
+    }
+    return cuda_stream_ptr(stream);
+}
+
+// Kernel types for different workload patterns
+enum KernelType { COMPUTE, MEMORY, MIXED, GEMM };
+
+// Configuration structure
+struct BenchmarkConfig {
+    int num_streams;
+    int num_kernels_per_stream;
+    int workload_size;
+    KernelType kernel_type;
+    bool enable_priorities;
+
+    BenchmarkConfig() : num_streams(4), num_kernels_per_stream(10),
+                        workload_size(1048576), kernel_type(MIXED),
+                        enable_priorities(false) {}
+};
+
+// Timing information per kernel
+struct KernelTiming {
+    int stream_id;
+    int kernel_id;
+    int priority;
+    float enqueue_time_ms;
+    float start_time_ms;
+    float end_time_ms;
+    float duration_ms;
+    float launch_latency_ms;
+};
+
+// Queue depth snapshot
+struct QueueSnapshot {
+    float time_ms;
+    int queued_count;
+    int executing_count;
+};
+
+// Compute-bound kernel: matrix operations
+__global__ void compute_kernel(float *data, int size, int iterations) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        float value = data[idx];
+        for (int i = 0; i < iterations; i++) {
+            value = sqrtf(value * value + 1.0f);
+            value = sinf(value) * cosf(value);
+        }
+        data[idx] = value;
+    }
+}
+
+// Memory-bound kernel: strided memory access
+__global__ void memory_kernel(float *input, float *output, int size, int stride) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        int read_idx = (idx * stride) % size;
+        output[idx] = input[read_idx] * 2.0f;
+    }
+}
+
+// Mixed workload kernel
+__global__ void mixed_kernel(float *data, int size) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < size) {
+        // Memory phase
+        float value = data[idx];
+
+        // Compute phase
+        for (int i = 0; i < 50; i++) {
+            value = sqrtf(value + 1.0f);
+        }
+
+        // Write back
+        data[idx] = value;
+    }
+}
+
+// GEMM kernel: C = A * B (tiled matrix multiplication)
+// For simplicity, we use square matrices of size sqrt(size) x sqrt(size)
+__global__ void gemm_kernel(float *A, float *B, float *C, int N) {
+    // Tile size
+    const int TILE_SIZE = 16;
+    __shared__ float As[TILE_SIZE][TILE_SIZE];
+    __shared__ float Bs[TILE_SIZE][TILE_SIZE];
+
+    int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    int col = blockIdx.x * TILE_SIZE + threadIdx.x;
+
+    float sum = 0.0f;
+
+    // Loop over tiles
+    for (int t = 0; t < (N + TILE_SIZE - 1) / TILE_SIZE; t++) {
+        // Load tiles into shared memory
+        if (row < N && (t * TILE_SIZE + threadIdx.x) < N)
+            As[threadIdx.y][threadIdx.x] = A[row * N + t * TILE_SIZE + threadIdx.x];
+        else
+            As[threadIdx.y][threadIdx.x] = 0.0f;
+
+        if (col < N && (t * TILE_SIZE + threadIdx.y) < N)
+            Bs[threadIdx.y][threadIdx.x] = B[(t * TILE_SIZE + threadIdx.y) * N + col];
+        else
+            Bs[threadIdx.y][threadIdx.x] = 0.0f;
+
+        __syncthreads();
+
+        // Compute partial product
+        for (int k = 0; k < TILE_SIZE; k++) {
+            sum += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+        }
+
+        __syncthreads();
+    }
+
+    // Write result
+    if (row < N && col < N) {
+        C[row * N + col] = sum;
+    }
+}
+
+// Launch appropriate kernel based on type
+void launch_kernel(KernelType type, float *d_data, float *d_temp, int size,
+                   dim3 grid, dim3 block, cudaStream_t stream, float *d_matrix_c = nullptr) {
+    switch (type) {
+        case COMPUTE:
+            compute_kernel<<<grid, block, 0, stream>>>(d_data, size, 100);
+            break;
+        case MEMORY:
+            memory_kernel<<<grid, block, 0, stream>>>(d_data, d_temp, size, 16);
+            break;
+        case MIXED:
+            mixed_kernel<<<grid, block, 0, stream>>>(d_data, size);
+            break;
+        case GEMM:
+            {
+                // For GEMM, interpret size as N*N elements, so N = sqrt(size)
+                int N = (int)sqrtf((float)size);
+                const int TILE_SIZE = 16;
+                dim3 gemm_grid((N + TILE_SIZE - 1) / TILE_SIZE, (N + TILE_SIZE - 1) / TILE_SIZE);
+                dim3 gemm_block(TILE_SIZE, TILE_SIZE);
+                gemm_kernel<<<gemm_grid, gemm_block, 0, stream>>>(d_data, d_temp, d_matrix_c, N);
+            }
+            break;
+    }
+}
+
+// Compute metrics from timing data
+void compute_metrics(const std::vector<KernelTiming> &timings,
+                     const BenchmarkConfig &config) {
+    if (timings.empty()) return;
+
+    // Find global start and end times
+    float global_start = timings[0].start_time_ms;
+    float global_end = timings[0].end_time_ms;
+    float total_kernel_time = 0.0f;
+
+    std::vector<float> durations;
+    for (const auto &t : timings) {
+        global_start = fminf(global_start, t.start_time_ms);
+        global_end = fmaxf(global_end, t.end_time_ms);
+        total_kernel_time += t.duration_ms;
+        durations.push_back(t.duration_ms);
+    }
+
+    float total_wall_time = global_end - global_start;
+    int total_kernels = timings.size();
+
+    // Concurrent execution rate
+    float ideal_parallel_time = total_kernel_time / config.num_streams;
+    float concurrent_rate = (ideal_parallel_time / total_wall_time) * 100.0f;
+    if (concurrent_rate > 100.0f) concurrent_rate = 100.0f;
+
+    // Average latency
+    float avg_latency = total_kernel_time / total_kernels;
+
+    // Throughput
+    float throughput = total_kernels / (total_wall_time / 1000.0f); // kernels/sec
+
+    // Load imbalance (standard deviation)
+    float mean_duration = avg_latency;
+    float variance = 0.0f;
+    for (float d : durations) {
+        variance += (d - mean_duration) * (d - mean_duration);
+    }
+    float stddev = sqrtf(variance / durations.size());
+
+    // Percentile latencies (P50, P95, P99)
+    std::vector<float> sorted_durations = durations;
+    std::sort(sorted_durations.begin(), sorted_durations.end());
+    float p50 = sorted_durations[sorted_durations.size() * 50 / 100];
+    float p95 = sorted_durations[sorted_durations.size() * 95 / 100];
+    float p99 = sorted_durations[sorted_durations.size() * 99 / 100];
+
+    // Jain's Fairness Index: (sum xi)^2 / (n * sum xi^2)
+    // Perfect fairness = 1.0, lower values indicate unfairness
+    std::vector<float> per_stream_time(config.num_streams, 0.0f);
+    for (const auto &t : timings) {
+        per_stream_time[t.stream_id] += t.duration_ms;
+    }
+    float sum_time = 0.0f, sum_time_squared = 0.0f;
+    for (float t : per_stream_time) {
+        sum_time += t;
+        sum_time_squared += t * t;
+    }
+    float jains_index = (sum_time * sum_time) / (config.num_streams * sum_time_squared);
+
+    // Launch latency statistics
+    float avg_launch_latency = 0.0f;
+    float max_launch_latency = 0.0f;
+    for (const auto &t : timings) {
+        avg_launch_latency += t.launch_latency_ms;
+        max_launch_latency = fmaxf(max_launch_latency, t.launch_latency_ms);
+    }
+    avg_launch_latency /= total_kernels;
+
+    // Priority inversion detection (if priorities enabled)
+    int priority_inversions = 0;
+    if (config.enable_priorities) {
+        for (size_t i = 0; i < timings.size(); i++) {
+            for (size_t j = i + 1; j < timings.size(); j++) {
+                // If higher priority (lower number) started later than lower priority
+                if (timings[i].priority < timings[j].priority &&
+                    timings[i].start_time_ms > timings[j].start_time_ms &&
+                    timings[j].end_time_ms > timings[i].start_time_ms) {
+                    priority_inversions++;
+                }
+            }
+        }
+    }
+
+    // Scheduler overhead (approximate)
+    float scheduler_overhead = ((total_wall_time - ideal_parallel_time) / total_wall_time) * 100.0f;
+    if (scheduler_overhead < 0.0f) scheduler_overhead = 0.0f;
+
+    // Estimate GPU utilization (simplified)
+    float gpu_utilization = concurrent_rate * 0.95f; // Approximate
+
+    // Queue depth analysis - find peak concurrent kernels
+    std::vector<std::pair<float, int>> events; // time, delta (+1 start, -1 end)
+    for (const auto &t : timings) {
+        events.push_back({t.start_time_ms, 1});
+        events.push_back({t.end_time_ms, -1});
+    }
+    std::sort(events.begin(), events.end());
+
+    int current_concurrent = 0;
+    int max_concurrent = 0;
+    float avg_concurrent = 0.0f;
+    float last_time = events[0].first;
+
+    for (const auto &e : events) {
+        if (e.first > last_time) {
+            avg_concurrent += current_concurrent * (e.first - last_time);
+        }
+        current_concurrent += e.second;
+        max_concurrent = std::max(max_concurrent, current_concurrent);
+        last_time = e.first;
+    }
+    avg_concurrent /= total_wall_time;
+
+    // Print results
+    printf("\n====================================\n");
+    printf("Multi-Stream Scheduler Benchmark\n");
+    printf("====================================\n");
+    printf("Configuration:\n");
+    printf("  Streams: %d\n", config.num_streams);
+    printf("  Kernels per stream: %d\n", config.num_kernels_per_stream);
+    printf("  Total kernels launched: %d\n", total_kernels);
+    printf("  Workload size: %d elements\n", config.workload_size);
+    printf("  Kernel type: %s\n",
+           config.kernel_type == COMPUTE ? "compute" :
+           config.kernel_type == MEMORY ? "memory" :
+           config.kernel_type == GEMM ? "gemm" : "mixed");
+    printf("\nResults:\n");
+    printf("  Total execution time: %.2f ms\n", total_wall_time);
+    printf("  Aggregate throughput: %.2f kernels/sec\n", throughput);
+    printf("\nLatency Metrics:\n");
+    printf("  Mean latency: %.2f ms\n", avg_latency);
+    printf("  P50 latency: %.2f ms\n", p50);
+    printf("  P95 latency: %.2f ms\n", p95);
+    printf("  P99 latency: %.2f ms\n", p99);
+    printf("  Avg launch latency: %.4f ms\n", avg_launch_latency);
+    printf("  Max launch latency: %.4f ms\n", max_launch_latency);
+    printf("\nScheduler Metrics:\n");
+    printf("  Concurrent execution rate: %.1f%%\n", concurrent_rate);
+    printf("  Scheduler overhead: %.1f%%\n", scheduler_overhead);
+    printf("  GPU utilization (est): %.1f%%\n", gpu_utilization);
+    printf("\nConcurrency Metrics:\n");
+    printf("  Max concurrent kernels: %d\n", max_concurrent);
+    printf("  Avg concurrent kernels: %.2f\n", avg_concurrent);
+    printf("  Peak concurrency: %d / %d streams (%.1f%%)\n",
+           max_concurrent, config.num_streams,
+           (float)max_concurrent / config.num_streams * 100.0f);
+    printf("\nFairness Metrics:\n");
+    printf("  Jain's Fairness Index: %.4f (1.0 = perfect)\n", jains_index);
+    printf("  Load imbalance (stddev): %.2f ms\n", stddev);
+    if (config.enable_priorities) {
+        printf("\nPriority Metrics:\n");
+        printf("  Priority inversions detected: %d\n", priority_inversions);
+    }
+    printf("====================================\n\n");
+
+    // CSV output for easy parsing
+    printf("CSV: streams,kernels_per_stream,total_kernels,type,wall_time_ms,throughput,mean_lat,p50,p95,p99,");
+    printf("concurrent_rate,overhead,util,jains_index,max_concurrent,avg_concurrent,inversions\n");
+    printf("CSV: %d,%d,%d,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.4f,%d,%.2f,%d\n",
+           config.num_streams, config.num_kernels_per_stream, total_kernels,
+           config.kernel_type == COMPUTE ? "compute" :
+           config.kernel_type == MEMORY ? "memory" :
+           config.kernel_type == GEMM ? "gemm" : "mixed",
+           total_wall_time, throughput, avg_latency, p50, p95, p99,
+           concurrent_rate, scheduler_overhead, gpu_utilization,
+           jains_index, max_concurrent, avg_concurrent, priority_inversions);
+}
+
+void print_usage(const char *prog_name) {
+    printf("Usage: %s [options]\n", prog_name);
+    printf("Options:\n");
+    printf("  -s, --streams NUM       Number of CUDA streams (default: 4)\n");
+    printf("  -k, --kernels NUM       Kernels per stream (default: 10)\n");
+    printf("  -w, --size NUM          Workload size in elements (default: 1048576)\n");
+    printf("  -t, --type TYPE         Kernel type: compute|memory|mixed|gemm (default: mixed)\n");
+    printf("  -p, --priority          Enable stream priorities\n");
+    printf("  -h, --help              Show this help message\n");
+}
+
+int main(int argc, char **argv) {
+    BenchmarkConfig config;
+
+    // Parse command line arguments
+    static struct option long_options[] = {
+        {"streams", required_argument, 0, 's'},
+        {"kernels", required_argument, 0, 'k'},
+        {"size", required_argument, 0, 'w'},
+        {"type", required_argument, 0, 't'},
+        {"priority", no_argument, 0, 'p'},
+        {"help", no_argument, 0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, "s:k:w:t:ph", long_options, NULL)) != -1) {
+        switch (opt) {
+            case 's':
+                config.num_streams = atoi(optarg);
+                break;
+            case 'k':
+                config.num_kernels_per_stream = atoi(optarg);
+                break;
+            case 'w':
+                config.workload_size = atoi(optarg);
+                break;
+            case 't':
+                if (strcmp(optarg, "compute") == 0) config.kernel_type = COMPUTE;
+                else if (strcmp(optarg, "memory") == 0) config.kernel_type = MEMORY;
+                else if (strcmp(optarg, "mixed") == 0) config.kernel_type = MIXED;
+                else if (strcmp(optarg, "gemm") == 0) config.kernel_type = GEMM;
+                else {
+                    fprintf(stderr, "Invalid kernel type: %s\n", optarg);
+                    return 1;
+                }
+                break;
+            case 'p':
+                config.enable_priorities = true;
+                break;
+            case 'h':
+                print_usage(argv[0]);
+                return 0;
+            default:
+                print_usage(argv[0]);
+                return 1;
+        }
+    }
+
+    // Initialize CUDA
+    CUDA_CHECK(cudaSetDevice(0));
+
+    cudaDeviceProp prop;
+    CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
+    printf("Running on: %s\n", prop.name);
+
+    // Allocate device memory using RAII
+    std::vector<cuda_unique_ptr<float>> d_data;
+    std::vector<cuda_unique_ptr<float>> d_temp;
+    std::vector<cuda_unique_ptr<float>> d_matrix_c;
+
+    d_data.reserve(config.num_streams);
+    d_temp.reserve(config.num_streams);
+    d_matrix_c.reserve(config.num_streams);
+
+    for (int i = 0; i < config.num_streams; i++) {
+        d_data.emplace_back(make_cuda_memory<float>(config.workload_size));
+        d_temp.emplace_back(make_cuda_memory<float>(config.workload_size));
+        CUDA_CHECK(cudaMemset(d_data[i].get(), 0, config.workload_size * sizeof(float)));
+
+        // Allocate result matrix for GEMM
+        if (config.kernel_type == GEMM) {
+            d_matrix_c.emplace_back(make_cuda_memory<float>(config.workload_size));
+        } else {
+            d_matrix_c.emplace_back(nullptr);
+        }
+    }
+
+    // Create streams with optional priorities using RAII
+    std::vector<cuda_stream_ptr> streams;
+    std::vector<int> stream_priorities;
+
+    streams.reserve(config.num_streams);
+    stream_priorities.reserve(config.num_streams);
+
+    if (config.enable_priorities) {
+        int least_priority, greatest_priority;
+        CUDA_CHECK(cudaDeviceGetStreamPriorityRange(&least_priority, &greatest_priority));
+        printf("Stream priority range: %d (high) to %d (low)\n", greatest_priority, least_priority);
+
+        for (int i = 0; i < config.num_streams; i++) {
+            // Assign priorities: distribute evenly across range
+            int priority = greatest_priority +
+                          (i * (least_priority - greatest_priority)) / (config.num_streams - 1);
+            stream_priorities.push_back(priority);
+            streams.emplace_back(make_cuda_stream(priority, true));
+            printf("Stream %d created with priority %d\n", i, priority);
+        }
+    } else {
+        for (int i = 0; i < config.num_streams; i++) {
+            stream_priorities.push_back(0);
+            streams.emplace_back(make_cuda_stream());
+        }
+    }
+
+    // Create events for timing using RAII
+    std::vector<cuda_event_ptr> start_events;
+    std::vector<cuda_event_ptr> end_events;
+    std::vector<KernelTiming> timings;
+
+    int total_kernels = config.num_streams * config.num_kernels_per_stream;
+    start_events.reserve(total_kernels);
+    end_events.reserve(total_kernels);
+
+    for (int i = 0; i < total_kernels; i++) {
+        start_events.emplace_back(make_cuda_event());
+        end_events.emplace_back(make_cuda_event());
+    }
+
+    // Launch configuration
+    dim3 block(256);
+    dim3 grid((config.workload_size + block.x - 1) / block.x);
+
+    // Warmup
+    for (int s = 0; s < config.num_streams; s++) {
+        launch_kernel(config.kernel_type, d_data[s].get(), d_temp[s].get(),
+                     config.workload_size, grid, block, *streams[s], d_matrix_c[s].get());
+    }
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Create additional events for enqueue time tracking
+    auto global_start = make_cuda_event();
+    CUDA_CHECK(cudaEventRecord(*global_start, 0));
+    CUDA_CHECK(cudaEventSynchronize(*global_start));
+
+    // Main benchmark: launch kernels across all streams
+    int event_idx = 0;
+    for (int k = 0; k < config.num_kernels_per_stream; k++) {
+        for (int s = 0; s < config.num_streams; s++) {
+            auto enqueue_event = make_cuda_event();
+            CUDA_CHECK(cudaEventRecord(*enqueue_event, 0));
+
+            CUDA_CHECK(cudaEventRecord(*start_events[event_idx], *streams[s]));
+
+            launch_kernel(config.kernel_type, d_data[s].get(), d_temp[s].get(),
+                         config.workload_size, grid, block, *streams[s], d_matrix_c[s].get());
+
+            CUDA_CHECK(cudaEventRecord(*end_events[event_idx], *streams[s]));
+
+            KernelTiming timing;
+            timing.stream_id = s;
+            timing.kernel_id = k;
+            timing.priority = stream_priorities[s];
+
+            // Store enqueue event for later
+            CUDA_CHECK(cudaEventSynchronize(*enqueue_event));
+            CUDA_CHECK(cudaEventElapsedTime(&timing.enqueue_time_ms, *global_start, *enqueue_event));
+
+            timings.push_back(timing);
+
+            event_idx++;
+        }
+    }
+
+    // Wait for all kernels to complete
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Calculate timings
+    cudaEvent_t first_event = *start_events[0];
+    for (size_t i = 0; i < start_events.size(); i++) {
+        CUDA_CHECK(cudaEventElapsedTime(&timings[i].start_time_ms,
+                                        first_event, *start_events[i]));
+        CUDA_CHECK(cudaEventElapsedTime(&timings[i].end_time_ms,
+                                        first_event, *end_events[i]));
+        timings[i].duration_ms = timings[i].end_time_ms - timings[i].start_time_ms;
+        timings[i].launch_latency_ms = timings[i].start_time_ms - timings[i].enqueue_time_ms;
+    }
+
+    // Compute and print metrics
+    compute_metrics(timings, config);
+
+    // All cleanup is automatic via RAII smart pointers
+
+    return 0;
+}
