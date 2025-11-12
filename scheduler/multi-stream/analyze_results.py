@@ -295,6 +295,103 @@ class ResultAnalyzer:
 
         return {}
 
+    def analyze_rq6_load_imbalance(self) -> Dict:
+        """Analyze RQ6: Load Imbalance and Fairness."""
+        print("\n=== RQ6: Load Imbalance and Fairness Analysis ===")
+
+        df = self.load_data("rq6_load_imbalance.csv")
+
+        # Group by pattern
+        stats = df.groupby('pattern_name').agg({
+            'jains_index': ['mean', 'std'],
+            'throughput': ['mean', 'std'],
+            'overhead': ['mean', 'std'],
+            'stddev': ['mean', 'std']
+        }).round(4)
+
+        print("\nLoad Imbalance Pattern Statistics:")
+        print(stats)
+
+        # Find most fair and most unfair
+        pattern_fairness = df.groupby('pattern_name')['jains_index'].mean().sort_values(ascending=False)
+        print(f"\n✓ Most fair pattern: {pattern_fairness.index[0]} (Jain's = {pattern_fairness.iloc[0]:.4f})")
+        print(f"✓ Most unfair pattern: {pattern_fairness.index[-1]} (Jain's = {pattern_fairness.iloc[-1]:.4f})")
+
+        # Fairness degradation
+        balanced_fairness = df[df['pattern_name'] == 'balanced_8']['jains_index'].mean()
+        imbalanced_fairness = df[df['pattern_name'] == 'imbalanced_4']['jains_index'].mean()
+        degradation = ((balanced_fairness - imbalanced_fairness) / balanced_fairness) * 100
+        print(f"✓ Fairness degradation (balanced → imbalanced): {degradation:.1f}%")
+
+        # Visualization
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+        # Fairness comparison
+        patterns = df['pattern_name'].unique()
+        fairness_means = [df[df['pattern_name'] == p]['jains_index'].mean() for p in patterns]
+        fairness_stds = [df[df['pattern_name'] == p]['jains_index'].std() for p in patterns]
+
+        axes[0, 0].barh(patterns, fairness_means, xerr=fairness_stds, capsize=5)
+        axes[0, 0].set_xlabel("Jain's Fairness Index")
+        axes[0, 0].set_ylabel('Load Pattern')
+        axes[0, 0].set_title("Fairness Across Load Imbalance Patterns")
+        axes[0, 0].axvline(x=1.0, color='r', linestyle='--', label='Perfect Fairness')
+        axes[0, 0].axvline(x=0.8, color='orange', linestyle='--', label='Acceptable')
+        axes[0, 0].legend()
+        axes[0, 0].grid(True, axis='x')
+
+        # Throughput comparison
+        throughput_means = [df[df['pattern_name'] == p]['throughput'].mean() for p in patterns]
+        throughput_stds = [df[df['pattern_name'] == p]['throughput'].std() for p in patterns]
+
+        axes[0, 1].barh(patterns, throughput_means, xerr=throughput_stds, capsize=5, color='green', alpha=0.7)
+        axes[0, 1].set_xlabel('Throughput (kernels/sec)')
+        axes[0, 1].set_ylabel('Load Pattern')
+        axes[0, 1].set_title("Throughput Across Load Imbalance Patterns")
+        axes[0, 1].grid(True, axis='x')
+
+        # Fairness vs Throughput scatter
+        pattern_data = []
+        for pattern in patterns:
+            pattern_df = df[df['pattern_name'] == pattern]
+            pattern_data.append({
+                'pattern': pattern,
+                'fairness': pattern_df['jains_index'].mean(),
+                'throughput': pattern_df['throughput'].mean()
+            })
+
+        scatter_df = pd.DataFrame(pattern_data)
+        axes[1, 0].scatter(scatter_df['fairness'], scatter_df['throughput'], s=100, alpha=0.7)
+
+        for _, row in scatter_df.iterrows():
+            axes[1, 0].annotate(row['pattern'],
+                               (row['fairness'], row['throughput']),
+                               fontsize=8, ha='right')
+
+        axes[1, 0].set_xlabel("Jain's Fairness Index")
+        axes[1, 0].set_ylabel('Throughput (kernels/sec)')
+        axes[1, 0].set_title('Fairness-Throughput Tradeoff')
+        axes[1, 0].grid(True)
+
+        # Scheduler overhead comparison
+        overhead_means = [df[df['pattern_name'] == p]['overhead'].mean() for p in patterns]
+
+        axes[1, 1].barh(patterns, overhead_means, color='red', alpha=0.6)
+        axes[1, 1].set_xlabel('Scheduler Overhead (%)')
+        axes[1, 1].set_ylabel('Load Pattern')
+        axes[1, 1].set_title('Scheduler Overhead Across Patterns')
+        axes[1, 1].grid(True, axis='x')
+
+        plt.tight_layout()
+        plt.savefig(self.figures_dir / "rq6_load_imbalance.png", dpi=300)
+        plt.close()
+
+        return {
+            'most_fair': pattern_fairness.index[0],
+            'most_unfair': pattern_fairness.index[-1],
+            'fairness_degradation_pct': degradation
+        }
+
     def analyze_rq7_tail_latency(self) -> Dict:
         """Analyze RQ7: Tail Latency."""
         print("\n=== RQ7: Tail Latency Analysis ===")
@@ -391,7 +488,7 @@ def main():
     parser = argparse.ArgumentParser(description="Analyze GPU scheduler experiments")
     parser.add_argument("--results", default="results", help="Results directory")
     parser.add_argument("--experiments", nargs="+",
-                       choices=["RQ1", "RQ2", "RQ3", "RQ4", "RQ5", "RQ7", "all"],
+                       choices=["RQ1", "RQ2", "RQ3", "RQ4", "RQ5", "RQ6", "RQ7", "all"],
                        default=["all"], help="Which experiments to analyze")
 
     args = parser.parse_args()
@@ -409,6 +506,7 @@ def main():
         "RQ3": analyzer.analyze_rq3_priority_effectiveness,
         "RQ4": analyzer.analyze_rq4_memory_pressure,
         "RQ5": analyzer.analyze_rq5_multi_process,
+        "RQ6": analyzer.analyze_rq6_load_imbalance,
         "RQ7": analyzer.analyze_rq7_tail_latency,
     }
 

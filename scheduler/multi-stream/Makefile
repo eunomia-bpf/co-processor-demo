@@ -124,6 +124,10 @@ experiment-rq5: $(TARGET) check-deps
 	@echo "Running RQ5: Multi-Process Interference ($(TRIALS) trials)..."
 	$(PYTHON) $(EXPERIMENT_DRIVER) --experiments RQ5 --trials $(TRIALS)
 
+experiment-rq6: $(TARGET) check-deps
+	@echo "Running RQ6: Load Imbalance and Fairness ($(TRIALS) trials)..."
+	$(PYTHON) $(EXPERIMENT_DRIVER) --experiments RQ6 --trials $(TRIALS)
+
 experiment-rq7: $(TARGET) check-deps
 	@echo "Running RQ7: Tail Latency ($(TRIALS) trials)..."
 	$(PYTHON) $(EXPERIMENT_DRIVER) --experiments RQ7 --trials $(TRIALS)
@@ -152,6 +156,9 @@ analyze-rq4: check-deps
 
 analyze-rq5: check-deps
 	$(PYTHON) $(ANALYZE_SCRIPT) --experiments RQ5
+
+analyze-rq6: check-deps
+	$(PYTHON) $(ANALYZE_SCRIPT) --experiments RQ6
 
 analyze-rq7: check-deps
 	$(PYTHON) $(ANALYZE_SCRIPT) --experiments RQ7
@@ -225,7 +232,7 @@ help:
 	@echo "=== Experiment Targets ==="
 	@echo "  make experiment-pilot    - Quick pilot (3 trials, ~5 min)"
 	@echo "  make experiment-full     - Full experiments ($(TRIALS) trials, ~30-60 min)"
-	@echo "  make experiment-rqN      - Run specific RQ (N=1,2,3,4,5,7)"
+	@echo "  make experiment-rqN      - Run specific RQ (N=1,2,3,4,5,6,7)"
 	@echo ""
 	@echo "=== Analysis Targets ==="
 	@echo "  make analyze             - Analyze all available results"
@@ -262,7 +269,7 @@ help:
 .PHONY: all debug multi-arch run test clean gpu-info help \
         check-deps install-deps \
         experiment-pilot experiment-full \
-        experiment-rq1 experiment-rq2 experiment-rq3 experiment-rq4 experiment-rq5 experiment-rq7 \
-        analyze analyze-rq1 analyze-rq2 analyze-rq3 analyze-rq4 analyze-rq5 analyze-rq7 \
+        experiment-rq1 experiment-rq2 experiment-rq3 experiment-rq4 experiment-rq5 experiment-rq6 experiment-rq7 \
+        analyze analyze-rq1 analyze-rq2 analyze-rq3 analyze-rq4 analyze-rq5 analyze-rq6 analyze-rq7 \
         workflow-quick workflow-full \
         archive-results view-results clean-results clean-all

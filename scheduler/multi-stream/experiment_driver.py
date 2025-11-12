@@ -30,6 +30,7 @@ class BenchmarkRunner:
 
     def run_single(self, streams: int, kernels: int, workload_size: int,
                    kernel_type: str, priority: bool = False,
+                   load_imbalance: Optional[str] = None,
                    trials: int = 1) -> List[Dict]:
         """Run benchmark with specified configuration."""
         results = []
@@ -44,6 +45,9 @@ class BenchmarkRunner:
 
         if priority:
             cmd.append("--priority")
+
+        if load_imbalance:
+            cmd.extend(["--load-imbalance", load_imbalance])
 
         for trial in range(trials):
             try:
@@ -282,6 +286,41 @@ class ExperimentSuite:
         df.to_csv(self.output_dir / "rq5_multi_process.csv", index=False)
         return df
 
+    def rq6_load_imbalance(self, trials: int = 10) -> pd.DataFrame:
+        """RQ6: Load imbalance and fairness."""
+        print("=== RQ6: Load Imbalance and Fairness ===")
+
+        # Test different load imbalance patterns
+        imbalance_patterns = [
+            ("5,5,5,5,5,5,5,5", "balanced_8"),
+            ("5,10,20,40", "imbalanced_4"),
+            ("10,10,10,10,20,20,20,20", "bimodal_8"),
+            ("5,10,15,20,25,30,35,40", "linear_8"),
+            ("20,20,20,20,20,20,20,5", "outlier_low"),
+            ("5,5,5,5,5,5,5,20", "outlier_high"),
+        ]
+
+        results = []
+
+        for pattern, pattern_name in imbalance_patterns:
+            print(f"Testing load pattern: {pattern_name} ({pattern})...")
+            trial_results = self.runner.run_single(
+                streams=8,  # Will be overridden by pattern length
+                kernels=20,  # Ignored when load_imbalance is set
+                workload_size=1048576,
+                kernel_type="mixed",
+                load_imbalance=pattern,
+                trials=trials
+            )
+            for r in trial_results:
+                r['pattern_name'] = pattern_name
+                r['pattern'] = pattern
+            results.extend(trial_results)
+
+        df = pd.DataFrame(results)
+        df.to_csv(self.output_dir / "rq6_load_imbalance.csv", index=False)
+        return df
+
     def rq7_tail_latency_contention(self, trials: int = 10) -> pd.DataFrame:
         """RQ7: Tail latency under contention."""
         print("=== RQ7: Tail Latency Under Contention ===")
@@ -314,6 +353,7 @@ class ExperimentSuite:
             ("RQ3", self.rq3_priority_effectiveness),
             ("RQ4", self.rq4_memory_pressure),
             ("RQ5", self.rq5_multi_process_interference),
+            ("RQ6", self.rq6_load_imbalance),
             ("RQ7", self.rq7_tail_latency_contention),
         ]
 
@@ -380,7 +420,7 @@ def main():
     )
     parser.add_argument(
         "--experiments", nargs="+",
-        choices=["RQ1", "RQ2", "RQ3", "RQ4", "RQ5", "RQ7", "all"],
+        choices=["RQ1", "RQ2", "RQ3", "RQ4", "RQ5", "RQ6", "RQ7", "all"],
         default=["all"],
         help="Which experiments to run"
     )
@@ -409,6 +449,7 @@ def main():
             "RQ3": suite.rq3_priority_effectiveness,
             "RQ4": suite.rq4_memory_pressure,
             "RQ5": suite.rq5_multi_process_interference,
+            "RQ6": suite.rq6_load_imbalance,
             "RQ7": suite.rq7_tail_latency_contention,
         }
 
