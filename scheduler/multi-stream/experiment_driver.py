@@ -343,6 +343,126 @@ class ExperimentSuite:
         df.to_csv(self.output_dir / "rq7_tail_latency.csv", index=False)
         return df
 
+    def rq9_priority_tail_latency(self, trials: int = 10) -> pd.DataFrame:
+        """RQ9: Priority-based tail latency (XSched comparison)."""
+        print("=== RQ9: Priority-Based Tail Latency ===")
+
+        # Test different front-end load intensities
+        configurations = [
+            # (streams, priority_enabled, front_kernels, back_kernels, load_label)
+            (2, False, 20, 20, "baseline_50pct"),
+            (2, True, 20, 20, "priority_50pct"),
+            (4, False, 10, 30, "baseline_25pct"),
+            (4, True, 10, 30, "priority_25pct"),
+            (4, False, 30, 10, "baseline_75pct"),
+            (4, True, 30, 10, "priority_75pct"),
+            (8, False, 20, 60, "baseline_25pct_8s"),
+            (8, True, 20, 60, "priority_25pct_8s"),
+        ]
+
+        results = []
+
+        for streams, use_priority, front_k, back_k, label in configurations:
+            print(f"Testing {label}: {streams} streams, priority={use_priority}...")
+
+            # Use load-imbalance to create front/back separation
+            # First half = front (high priority), second half = back (low priority)
+            pattern_parts = []
+            for i in range(streams // 2):
+                pattern_parts.append(str(front_k))
+            for i in range(streams - streams // 2):
+                pattern_parts.append(str(back_k))
+            pattern = ",".join(pattern_parts)
+
+            trial_results = self.runner.run_single(
+                streams=streams,
+                kernels=20,  # Ignored when load_imbalance set
+                workload_size=1048576,
+                kernel_type="mixed",
+                priority=use_priority,
+                load_imbalance=pattern,
+                trials=trials
+            )
+            for r in trial_results:
+                r['config_label'] = label
+                r['front_kernels'] = front_k
+                r['back_kernels'] = back_k
+                r['priority_enabled'] = use_priority
+                r['front_ratio'] = front_k / (front_k + back_k)
+            results.extend(trial_results)
+
+        df = pd.DataFrame(results)
+        df.to_csv(self.output_dir / "rq9_priority_tail_latency.csv", index=False)
+        return df
+
+    def rq10_preemption_latency(self, trials: int = 10) -> pd.DataFrame:
+        """RQ10: Scheduler preemption latency."""
+        print("=== RQ10: Preemption Latency ===")
+        print("NOTE: This requires custom benchmark binary with preemption measurement")
+        print("Skipping for now - needs implementation in multi_stream_bench.cu")
+
+        # Placeholder: This would require modifying the benchmark to:
+        # 1. Launch long kernel on stream A
+        # 2. After delay, launch short kernel on stream B
+        # 3. Measure time from B's launch to B's execution start
+
+        # For now, return empty DataFrame
+        df = pd.DataFrame()
+        df.to_csv(self.output_dir / "rq10_preemption_latency.csv", index=False)
+        return df
+
+    def rq11_bandwidth_partitioning(self, trials: int = 10) -> pd.DataFrame:
+        """RQ11: Bandwidth partitioning and quota enforcement."""
+        print("=== RQ11: Bandwidth Partitioning ===")
+
+        # Test different target ratios
+        target_ratios = [
+            (50, 50, "50/50"),
+            (75, 25, "75/25"),
+            (90, 10, "90/10"),
+            (95, 5, "95/5"),
+        ]
+
+        results = []
+
+        for front_pct, back_pct, label in target_ratios:
+            print(f"Testing {label} bandwidth partition...")
+
+            # Use load-imbalance to approximate quota
+            # Front gets front_pct kernels, back gets back_pct kernels
+            # Scale to reasonable total (e.g., 100 kernels total)
+            total_kernels = 100
+            front_k = int(total_kernels * front_pct / 100)
+            back_k = int(total_kernels * back_pct / 100)
+
+            # Create pattern: 4 front streams + 4 back streams
+            pattern_parts = []
+            for i in range(4):
+                pattern_parts.append(str(front_k // 4))
+            for i in range(4):
+                pattern_parts.append(str(back_k // 4))
+            pattern = ",".join(pattern_parts)
+
+            trial_results = self.runner.run_single(
+                streams=8,
+                kernels=20,  # Ignored
+                workload_size=1048576,
+                kernel_type="mixed",
+                load_imbalance=pattern,
+                trials=trials
+            )
+            for r in trial_results:
+                r['target_ratio'] = label
+                r['target_front_pct'] = front_pct
+                r['target_back_pct'] = back_pct
+                r['front_kernels'] = front_k
+                r['back_kernels'] = back_k
+            results.extend(trial_results)
+
+        df = pd.DataFrame(results)
+        df.to_csv(self.output_dir / "rq11_bandwidth_partition.csv", index=False)
+        return df
+
     def run_all(self, trials: int = 10) -> Dict[str, pd.DataFrame]:
         """Run all research question experiments."""
         results = {}
@@ -355,6 +475,9 @@ class ExperimentSuite:
             ("RQ5", self.rq5_multi_process_interference),
             ("RQ6", self.rq6_load_imbalance),
             ("RQ7", self.rq7_tail_latency_contention),
+            ("RQ9", self.rq9_priority_tail_latency),
+            ("RQ10", self.rq10_preemption_latency),
+            ("RQ11", self.rq11_bandwidth_partitioning),
         ]
 
         for name, experiment_func in experiments:
@@ -420,7 +543,7 @@ def main():
     )
     parser.add_argument(
         "--experiments", nargs="+",
-        choices=["RQ1", "RQ2", "RQ3", "RQ4", "RQ5", "RQ6", "RQ7", "all"],
+        choices=["RQ1", "RQ2", "RQ3", "RQ4", "RQ5", "RQ6", "RQ7", "RQ9", "RQ10", "RQ11", "all"],
         default=["all"],
         help="Which experiments to run"
     )
@@ -451,6 +574,9 @@ def main():
             "RQ5": suite.rq5_multi_process_interference,
             "RQ6": suite.rq6_load_imbalance,
             "RQ7": suite.rq7_tail_latency_contention,
+            "RQ9": suite.rq9_priority_tail_latency,
+            "RQ10": suite.rq10_preemption_latency,
+            "RQ11": suite.rq11_bandwidth_partitioning,
         }
 
         for exp_name in args.experiments:

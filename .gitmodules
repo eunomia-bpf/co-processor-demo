@@ -4,3 +4,7 @@
 [submodule "external/spdk"]
 	path = external/spdk
 	url = https://github.com/spdk/spdk.git
+
+[submodule "scheduler/xsched"]
+	path = scheduler/xsched
+	url = https://github.com/XpuOS/xsched

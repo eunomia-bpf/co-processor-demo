@@ -7,12 +7,20 @@
 // Kernel types for different workload patterns
 enum KernelType { COMPUTE, MEMORY, MIXED, GEMM };
 
+// GPU-side timestamp structure for microsecond precision
+struct GPUTimestamp {
+    unsigned long long start_clock;
+    unsigned long long end_clock;
+    int thread_id;
+};
+
 // Compute-bound kernel: matrix operations
 __global__ void compute_kernel(float *data, int size, int iterations) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         float value = data[idx];
-        for (int i = 0; i < iterations; i++) {
+        // Increased iterations for measurable execution time
+        for (int i = 0; i < iterations * 10; i++) {
             value = sqrtf(value * value + 1.0f);
             value = sinf(value) * cosf(value);
         }
@@ -36,8 +44,8 @@ __global__ void mixed_kernel(float *data, int size) {
         // Memory phase
         float value = data[idx];
 
-        // Compute phase
-        for (int i = 0; i < 50; i++) {
+        // Compute phase - increased to make kernels take 100-500µs
+        for (int i = 0; i < 500; i++) {
             value = sqrtf(value + 1.0f);
         }
 

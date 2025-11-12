@@ -438,6 +438,145 @@ class ResultAnalyzer:
 
         return {}
 
+    def analyze_rq9_priority_tail_latency(self) -> Dict:
+        """Analyze RQ9: Priority-based tail latency (XSched comparison)."""
+        print("\n=== RQ9: Priority-Based Tail Latency Analysis ===")
+
+        df = self.load_data("rq9_priority_tail_latency.csv")
+
+        # Compare priority vs baseline
+        baseline_df = df[~df['priority_enabled']]
+        priority_df = df[df['priority_enabled']]
+
+        print("\nP99 Latency Comparison (Priority vs Baseline):")
+
+        # Group by front load ratio
+        for ratio in df['front_ratio'].unique():
+            baseline_p99 = baseline_df[baseline_df['front_ratio'] == ratio]['p99'].mean()
+            priority_p99 = priority_df[priority_df['front_ratio'] == ratio]['p99'].mean()
+            improvement = baseline_p99 / priority_p99 if priority_p99 > 0 else 1.0
+
+            print(f"  Front load {ratio*100:.0f}%: Baseline P99={baseline_p99:.3f}ms, "
+                  f"Priority P99={priority_p99:.3f}ms, Improvement={improvement:.2f}×")
+
+        # Visualization
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+        # P99 latency CDF comparison
+        for priority_enabled in [False, True]:
+            subset = df[df['priority_enabled'] == priority_enabled]
+            label = "Priority Enabled" if priority_enabled else "Baseline (No Priority)"
+            axes[0].hist(subset['p99'], bins=20, alpha=0.6, label=label, density=True, cumulative=True)
+
+        axes[0].set_xlabel('P99 Latency (ms)')
+        axes[0].set_ylabel('CDF')
+        axes[0].set_title('P99 Latency CDF: Priority vs Baseline')
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3)
+
+        # Improvement by load ratio
+        ratios = sorted(df['front_ratio'].unique())
+        improvements = []
+        for ratio in ratios:
+            baseline_p99 = baseline_df[baseline_df['front_ratio'] == ratio]['p99'].mean()
+            priority_p99 = priority_df[priority_df['front_ratio'] == ratio]['p99'].mean()
+            improvements.append(baseline_p99 / priority_p99 if priority_p99 > 0 else 1.0)
+
+        axes[1].bar([f"{r*100:.0f}%" for r in ratios], improvements, color='green', alpha=0.7)
+        axes[1].axhline(y=1.0, color='r', linestyle='--', label='No improvement')
+        axes[1].axhline(y=2.0, color='orange', linestyle='--', label='XSched target (2×)')
+        axes[1].set_xlabel('Front-end Load Ratio')
+        axes[1].set_ylabel('P99 Improvement (×)')
+        axes[1].set_title('Priority Effectiveness by Load')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+        plt.savefig(self.figures_dir / "rq9_priority_tail_latency.png", dpi=300)
+        plt.close()
+
+        return {
+            'max_improvement': max(improvements),
+            'avg_improvement': np.mean(improvements)
+        }
+
+    def analyze_rq10_preemption_latency(self) -> Dict:
+        """Analyze RQ10: Preemption latency."""
+        print("\n=== RQ10: Preemption Latency Analysis ===")
+        print("NOTE: RQ10 requires custom implementation - no data yet")
+
+        # Placeholder - would analyze preemption latency vs command duration
+        return {}
+
+    def analyze_rq11_bandwidth_partitioning(self) -> Dict:
+        """Analyze RQ11: Bandwidth partitioning."""
+        print("\n=== RQ11: Bandwidth Partitioning Analysis ===")
+
+        df = self.load_data("rq11_bandwidth_partition.csv")
+
+        print("\nQuota Accuracy (Target vs Achieved):")
+
+        results = []
+        for target_ratio in df['target_ratio'].unique():
+            subset = df[df['target_ratio'] == target_ratio]
+
+            # Calculate actual throughput ratio
+            # Assuming first 4 streams are front, last 4 are back
+            front_throughput = subset['throughput'].mean() * subset['front_kernels'].mean() / subset['total_kernels'].mean()
+            back_throughput = subset['throughput'].mean() * subset['back_kernels'].mean() / subset['total_kernels'].mean()
+            total = front_throughput + back_throughput
+
+            actual_front_pct = (front_throughput / total) * 100 if total > 0 else 0
+            target_front_pct = subset['target_front_pct'].mean()
+
+            error = abs(actual_front_pct - target_front_pct)
+
+            print(f"  {target_ratio}: Target={target_front_pct:.0f}%, "
+                  f"Achieved={actual_front_pct:.1f}%, Error={error:.1f}%")
+
+            results.append({
+                'target_ratio': target_ratio,
+                'target_pct': target_front_pct,
+                'actual_pct': actual_front_pct,
+                'error': error
+            })
+
+        # Visualization
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+        # Target vs Achieved
+        result_df = pd.DataFrame(results)
+        x = np.arange(len(result_df))
+        width = 0.35
+
+        axes[0].bar(x - width/2, result_df['target_pct'], width, label='Target', alpha=0.8)
+        axes[0].bar(x + width/2, result_df['actual_pct'], width, label='Achieved', alpha=0.8)
+        axes[0].set_xlabel('Target Ratio')
+        axes[0].set_ylabel('Front-end Bandwidth (%)')
+        axes[0].set_title('Bandwidth Partition: Target vs Achieved')
+        axes[0].set_xticks(x)
+        axes[0].set_xticklabels(result_df['target_ratio'])
+        axes[0].legend()
+        axes[0].grid(True, alpha=0.3, axis='y')
+
+        # Error analysis
+        axes[1].bar(result_df['target_ratio'], result_df['error'], color='red', alpha=0.6)
+        axes[1].axhline(y=5.0, color='orange', linestyle='--', label='Target <5% error')
+        axes[1].set_xlabel('Target Ratio')
+        axes[1].set_ylabel('Quota Error (%)')
+        axes[1].set_title('Bandwidth Partition Accuracy')
+        axes[1].legend()
+        axes[1].grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+        plt.savefig(self.figures_dir / "rq11_bandwidth_partition.png", dpi=300)
+        plt.close()
+
+        return {
+            'max_error': result_df['error'].max(),
+            'avg_error': result_df['error'].mean()
+        }
+
     def generate_summary_report(self, analyses: Dict) -> str:
         """Generate markdown summary report."""
         report = "# GPU Scheduler Experiment Results\n\n"
@@ -488,7 +627,7 @@ def main():
     parser = argparse.ArgumentParser(description="Analyze GPU scheduler experiments")
     parser.add_argument("--results", default="results", help="Results directory")
     parser.add_argument("--experiments", nargs="+",
-                       choices=["RQ1", "RQ2", "RQ3", "RQ4", "RQ5", "RQ6", "RQ7", "all"],
+                       choices=["RQ1", "RQ2", "RQ3", "RQ4", "RQ5", "RQ6", "RQ7", "RQ9", "RQ10", "RQ11", "all"],
                        default=["all"], help="Which experiments to analyze")
 
     args = parser.parse_args()
@@ -508,6 +647,9 @@ def main():
         "RQ5": analyzer.analyze_rq5_multi_process,
         "RQ6": analyzer.analyze_rq6_load_imbalance,
         "RQ7": analyzer.analyze_rq7_tail_latency,
+        "RQ9": analyzer.analyze_rq9_priority_tail_latency,
+        "RQ10": analyzer.analyze_rq10_preemption_latency,
+        "RQ11": analyzer.analyze_rq11_bandwidth_partitioning,
     }
 
     experiments_to_run = list(exp_map.keys()) if "all" in args.experiments else args.experiments

@@ -132,6 +132,18 @@ experiment-rq7: $(TARGET) check-deps
 	@echo "Running RQ7: Tail Latency ($(TRIALS) trials)..."
 	$(PYTHON) $(EXPERIMENT_DRIVER) --experiments RQ7 --trials $(TRIALS)
 
+experiment-rq9: $(TARGET) check-deps
+	@echo "Running RQ9: Priority-Based Tail Latency ($(TRIALS) trials)..."
+	$(PYTHON) $(EXPERIMENT_DRIVER) --experiments RQ9 --trials $(TRIALS)
+
+experiment-rq10: $(TARGET) check-deps
+	@echo "Running RQ10: Preemption Latency ($(TRIALS) trials)..."
+	$(PYTHON) $(EXPERIMENT_DRIVER) --experiments RQ10 --trials $(TRIALS)
+
+experiment-rq11: $(TARGET) check-deps
+	@echo "Running RQ11: Bandwidth Partitioning ($(TRIALS) trials)..."
+	$(PYTHON) $(EXPERIMENT_DRIVER) --experiments RQ11 --trials $(TRIALS)
+
 # Analyze all available results
 analyze: check-deps
 	@echo "Analyzing experimental results..."
@@ -162,6 +174,15 @@ analyze-rq6: check-deps
 
 analyze-rq7: check-deps
 	$(PYTHON) $(ANALYZE_SCRIPT) --experiments RQ7
+
+analyze-rq9: check-deps
+	$(PYTHON) $(ANALYZE_SCRIPT) --experiments RQ9
+
+analyze-rq10: check-deps
+	$(PYTHON) $(ANALYZE_SCRIPT) --experiments RQ10
+
+analyze-rq11: check-deps
+	$(PYTHON) $(ANALYZE_SCRIPT) --experiments RQ11
 
 # Complete workflow: build, run experiments, analyze
 workflow-quick: clean $(TARGET)
@@ -232,7 +253,7 @@ help:
 	@echo "=== Experiment Targets ==="
 	@echo "  make experiment-pilot    - Quick pilot (3 trials, ~5 min)"
 	@echo "  make experiment-full     - Full experiments ($(TRIALS) trials, ~30-60 min)"
-	@echo "  make experiment-rqN      - Run specific RQ (N=1,2,3,4,5,6,7)"
+	@echo "  make experiment-rqN      - Run specific RQ (N=1,2,3,4,5,6,7,9,10,11)"
 	@echo ""
 	@echo "=== Analysis Targets ==="
 	@echo "  make analyze             - Analyze all available results"
@@ -270,6 +291,8 @@ help:
         check-deps install-deps \
         experiment-pilot experiment-full \
         experiment-rq1 experiment-rq2 experiment-rq3 experiment-rq4 experiment-rq5 experiment-rq6 experiment-rq7 \
+        experiment-rq9 experiment-rq10 experiment-rq11 \
         analyze analyze-rq1 analyze-rq2 analyze-rq3 analyze-rq4 analyze-rq5 analyze-rq6 analyze-rq7 \
+        analyze-rq9 analyze-rq10 analyze-rq11 \
         workflow-quick workflow-full \
         archive-results view-results clean-results clean-all
