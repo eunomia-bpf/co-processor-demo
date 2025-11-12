@@ -1,1 +1,2 @@
-./correlation.exe
+#!/bin/bash
+./run

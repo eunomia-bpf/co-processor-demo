@@ -1,1 +1,2 @@
-./particlefilter_float -x 128 -y 128 -z 10 -np 1000
+#!/bin/bash
+./particlefilter -x 128 -y 128 -z 10 -np 1000

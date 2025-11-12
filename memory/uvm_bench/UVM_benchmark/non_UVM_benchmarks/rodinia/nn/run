@@ -1,1 +1,7 @@
-./nn filelist_4 -r 5 -lat 30 -lng 90
+#!/bin/bash
+if [ -f ../../../data/nn/cane4_0.db ]; then
+    ./nn ../../../data/nn/cane4_0.db -r 5 -lat 30 -lng 90
+else
+    echo "NN: Data files not found"
+    exit 1
+fi

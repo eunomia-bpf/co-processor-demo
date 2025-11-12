@@ -1,1 +1,2 @@
-./2DConvolution.exe
+#!/bin/bash
+./mem_trace_run
