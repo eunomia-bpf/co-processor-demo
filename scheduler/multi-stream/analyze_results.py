@@ -231,59 +231,169 @@ class ResultAnalyzer:
             }
 
     def analyze_rq2_workload_characterization(self) -> Dict:
-        """Analyze RQ2: Workload Characterization."""
+        """Analyze RQ2: Workload Characterization with varying stream counts."""
         print("\n=== RQ2: Workload Characterization Analysis ===")
 
         df = self.load_data("rq2_workload_characterization.csv")
+        df['streams'] = pd.to_numeric(df['streams'])
 
-        # Statistics by workload type
-        stats = df.groupby('type').agg({
-            'concurrent_rate': ['mean', 'std'],
-            'throughput': ['mean', 'std'],
-            'mean_lat': ['mean', 'std'],
-            'util': ['mean', 'std']
-        }).round(2)
+        # Check if we have stream count variations
+        has_stream_variations = len(df['streams'].unique()) > 1
 
-        print("\nWorkload Type vs Metrics:")
-        print(stats)
+        if has_stream_variations:
+            # Multi-line plot analysis
+            print("\nWorkload Type vs Stream Count Analysis:")
 
-        # Best workload for concurrency
-        best_concurrent = df.groupby('type')['concurrent_rate'].mean().idxmax()
-        best_throughput = df.groupby('type')['throughput'].mean().idxmax()
+            kernel_types = sorted(df['type'].unique())
+            colors = plt.cm.tab10(np.linspace(0, 1, len(kernel_types)))
 
-        print(f"\n✓ Best concurrency: {best_concurrent}")
-        print(f"✓ Best throughput: {best_throughput}")
+            # Print statistics for each workload type
+            for ktype in kernel_types:
+                type_df = df[df['type'] == ktype]
+                print(f"\n{ktype.upper()} workload:")
+                stats = type_df.groupby('streams').agg({
+                    'concurrent_rate': 'mean',
+                    'throughput': 'mean',
+                    'max_concurrent': 'mean',
+                }).round(2)
+                print(stats.head())
 
-        # Visualization
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+            # Find best configuration
+            best_config = df.loc[df['concurrent_rate'].idxmax()]
+            print(f"\n✓ Best concurrency: {best_config['type']} with {int(best_config['streams'])} streams")
+            print(f"  concurrent_rate = {best_config['concurrent_rate']:.1f}%")
+            print(f"  max_concurrent = {best_config['max_concurrent']:.1f}")
 
-        workload_order = ['compute', 'memory', 'mixed', 'gemm']
+            # Visualization with multiple lines per workload type
+            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 
-        # Box plots for each metric
-        sns.boxplot(data=df, x='type', y='concurrent_rate', order=workload_order, ax=axes[0, 0])
-        axes[0, 0].set_title('Concurrent Execution Rate by Workload')
-        axes[0, 0].set_ylabel('Concurrent Rate (%)')
+            # Plot 1: Concurrent execution rate
+            for i, ktype in enumerate(kernel_types):
+                type_df = df[df['type'] == ktype]
+                grouped = type_df.groupby('streams').agg({
+                    'concurrent_rate': ['mean', 'std']
+                }).reset_index()
+                axes[0, 0].errorbar(grouped['streams'], grouped['concurrent_rate']['mean'],
+                                   yerr=grouped['concurrent_rate']['std'],
+                                   fmt='o-', linewidth=2, markersize=6,
+                                   label=ktype.upper(), color=colors[i],
+                                   capsize=4, alpha=0.8)
+            axes[0, 0].set_xlabel('Stream Count')
+            axes[0, 0].set_ylabel('Concurrent Execution Rate (%)')
+            axes[0, 0].set_title('Concurrent Execution Rate vs Stream Count')
+            axes[0, 0].legend(title='Workload Type', fontsize=10)
+            axes[0, 0].grid(True, alpha=0.3)
+            axes[0, 0].set_xscale('log', base=2)
 
-        sns.boxplot(data=df, x='type', y='throughput', order=workload_order, ax=axes[0, 1])
-        axes[0, 1].set_title('Throughput by Workload')
-        axes[0, 1].set_ylabel('Throughput (kernels/sec)')
+            # Plot 2: Throughput
+            for i, ktype in enumerate(kernel_types):
+                type_df = df[df['type'] == ktype]
+                grouped = type_df.groupby('streams').agg({
+                    'throughput': ['mean', 'std']
+                }).reset_index()
+                axes[0, 1].errorbar(grouped['streams'], grouped['throughput']['mean'],
+                                   yerr=grouped['throughput']['std'],
+                                   fmt='s-', linewidth=2, markersize=6,
+                                   label=ktype.upper(), color=colors[i],
+                                   capsize=4, alpha=0.8)
+            axes[0, 1].set_xlabel('Stream Count')
+            axes[0, 1].set_ylabel('Throughput (kernels/sec)')
+            axes[0, 1].set_title('Throughput vs Stream Count')
+            axes[0, 1].legend(title='Workload Type', fontsize=10)
+            axes[0, 1].grid(True, alpha=0.3)
+            axes[0, 1].set_xscale('log', base=2)
 
-        sns.boxplot(data=df, x='type', y='mean_lat', order=workload_order, ax=axes[1, 0])
-        axes[1, 0].set_title('Mean Latency by Workload')
-        axes[1, 0].set_ylabel('Latency (ms)')
+            # Plot 3: Max concurrent kernels
+            for i, ktype in enumerate(kernel_types):
+                type_df = df[df['type'] == ktype]
+                grouped = type_df.groupby('streams').agg({
+                    'max_concurrent': ['mean', 'std']
+                }).reset_index()
+                axes[1, 0].errorbar(grouped['streams'], grouped['max_concurrent']['mean'],
+                                   yerr=grouped['max_concurrent']['std'],
+                                   fmt='^-', linewidth=2, markersize=6,
+                                   label=ktype.upper(), color=colors[i],
+                                   capsize=4, alpha=0.8)
+            axes[1, 0].set_xlabel('Stream Count')
+            axes[1, 0].set_ylabel('Max Concurrent Kernels')
+            axes[1, 0].set_title('Max Concurrent Kernels vs Stream Count')
+            axes[1, 0].legend(title='Workload Type', fontsize=10)
+            axes[1, 0].grid(True, alpha=0.3)
+            axes[1, 0].set_xscale('log', base=2)
 
-        sns.boxplot(data=df, x='type', y='util', order=workload_order, ax=axes[1, 1])
-        axes[1, 1].set_title('GPU Utilization by Workload')
-        axes[1, 1].set_ylabel('Utilization (%)')
+            # Plot 4: Mean latency
+            for i, ktype in enumerate(kernel_types):
+                type_df = df[df['type'] == ktype]
+                grouped = type_df.groupby('streams').agg({
+                    'mean_lat': ['mean', 'std']
+                }).reset_index()
+                axes[1, 1].errorbar(grouped['streams'], grouped['mean_lat']['mean'],
+                                   yerr=grouped['mean_lat']['std'],
+                                   fmt='d-', linewidth=2, markersize=6,
+                                   label=ktype.upper(), color=colors[i],
+                                   capsize=4, alpha=0.8)
+            axes[1, 1].set_xlabel('Stream Count')
+            axes[1, 1].set_ylabel('Mean Latency (ms)')
+            axes[1, 1].set_title('Mean Latency vs Stream Count')
+            axes[1, 1].legend(title='Workload Type', fontsize=10)
+            axes[1, 1].grid(True, alpha=0.3)
+            axes[1, 1].set_xscale('log', base=2)
 
-        plt.tight_layout()
-        plt.savefig(self.figures_dir / "rq2_workload_characterization.png", dpi=300)
-        plt.close()
+            plt.tight_layout()
+            plt.savefig(self.figures_dir / "rq2_workload_characterization.png", dpi=300)
+            plt.close()
 
-        return {
-            "best_concurrent_workload": best_concurrent,
-            "best_throughput_workload": best_throughput
-        }
+            return {
+                "best_concurrent_workload": best_config['type'],
+                "best_concurrent_streams": int(best_config['streams']),
+                "best_throughput_workload": df.loc[df['throughput'].idxmax()]['type']
+            }
+
+        else:
+            # Legacy single-stream-count analysis
+            stats = df.groupby('type').agg({
+                'concurrent_rate': ['mean', 'std'],
+                'throughput': ['mean', 'std'],
+                'mean_lat': ['mean', 'std'],
+                'util': ['mean', 'std']
+            }).round(2)
+
+            print("\nWorkload Type vs Metrics:")
+            print(stats)
+
+            best_concurrent = df.groupby('type')['concurrent_rate'].mean().idxmax()
+            best_throughput = df.groupby('type')['throughput'].mean().idxmax()
+
+            print(f"\n✓ Best concurrency: {best_concurrent}")
+            print(f"✓ Best throughput: {best_throughput}")
+
+            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+            workload_order = ['compute', 'memory', 'mixed', 'gemm']
+
+            sns.boxplot(data=df, x='type', y='concurrent_rate', order=workload_order, ax=axes[0, 0])
+            axes[0, 0].set_title('Concurrent Execution Rate by Workload')
+            axes[0, 0].set_ylabel('Concurrent Rate (%)')
+
+            sns.boxplot(data=df, x='type', y='throughput', order=workload_order, ax=axes[0, 1])
+            axes[0, 1].set_title('Throughput by Workload')
+            axes[0, 1].set_ylabel('Throughput (kernels/sec)')
+
+            sns.boxplot(data=df, x='type', y='mean_lat', order=workload_order, ax=axes[1, 0])
+            axes[1, 0].set_title('Mean Latency by Workload')
+            axes[1, 0].set_ylabel('Latency (ms)')
+
+            sns.boxplot(data=df, x='type', y='util', order=workload_order, ax=axes[1, 1])
+            axes[1, 1].set_title('GPU Utilization by Workload')
+            axes[1, 1].set_ylabel('Utilization (%)')
+
+            plt.tight_layout()
+            plt.savefig(self.figures_dir / "rq2_workload_characterization.png", dpi=300)
+            plt.close()
+
+            return {
+                "best_concurrent_workload": best_concurrent,
+                "best_throughput_workload": best_throughput
+            }
 
     def analyze_rq3_priority_effectiveness(self) -> Dict:
         """Analyze RQ3: Priority Effectiveness."""

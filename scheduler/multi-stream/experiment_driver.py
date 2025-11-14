@@ -208,26 +208,31 @@ class ExperimentSuite:
         print(f"\n✓ RQ1 complete: {len(df)} data points collected")
         return df
 
-    def rq2_workload_characterization(self, trials: int = 10) -> pd.DataFrame:
-        """RQ2: Workload characterization experiment."""
+    def rq2_workload_characterization(self, trials: int = 3) -> pd.DataFrame:
+        """RQ2: Workload characterization experiment with varying stream counts."""
         print("=== RQ2: Workload Characterization ===")
 
         kernel_types = ["compute", "memory", "mixed", "gemm"]
+        stream_counts = [1, 2, 4, 8, 16, 32, 64]
         results = []
 
         for ktype in kernel_types:
-            print(f"Testing {ktype} workload...")
-            trial_results = self.runner.run_single(
-                streams=8,
-                kernels=20,
-                workload_size=self.workload_size,
-                kernel_type=ktype,
-                trials=trials
-            )
-            results.extend(trial_results)
+            print(f"\nTesting {ktype} workload:")
+            for streams in stream_counts:
+                print(f"  {streams} streams...", end=" ", flush=True)
+                trial_results = self.runner.run_single(
+                    streams=streams,
+                    kernels=20,
+                    workload_size=self.workload_size,
+                    kernel_type=ktype,
+                    trials=trials
+                )
+                results.extend(trial_results)
+                print("done")
 
         df = pd.DataFrame(results)
         df.to_csv(self.output_dir / "rq2_workload_characterization.csv", index=False)
+        print(f"\n✓ RQ2 complete: {len(df)} data points collected")
         return df
 
     def rq3_priority_effectiveness(self, trials: int = 10) -> pd.DataFrame:
