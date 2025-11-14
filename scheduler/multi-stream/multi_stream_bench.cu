@@ -13,6 +13,7 @@
 #include <map>
 #include <string>
 #include <chrono>
+#include <random>
 #include "common.h"
 #include "metrics.h"
 
@@ -99,7 +100,39 @@ void print_usage(const char *prog_name) {
     printf("  -H, --heterogeneous SPEC   Heterogeneous kernel types (e.g., \"memory,memory,compute,compute\")\n");
     printf("  -f, --launch-frequency SPEC  Launch frequency per stream in Hz (e.g., \"100,100,20,20\", 0=max)\n");
     printf("  -d, --debug-trace       Enable detailed debug trace output (skips regular metrics)\n");
+    printf("  -o, --csv-output FILE   Write raw timing data to CSV file\n");
+    printf("  -S, --seed NUM          Random seed for jitter control (default: 0)\n");
     printf("  -h, --help              Show this help message\n");
+}
+
+// Write raw timing data to CSV file
+void write_timing_csv(const std::vector<KernelTiming> &timings, const BenchmarkConfig &config, const std::string &filename) {
+    FILE *fp = fopen(filename.c_str(), "w");
+    if (!fp) {
+        fprintf(stderr, "Error: Cannot open CSV file '%s' for writing\n", filename.c_str());
+        return;
+    }
+
+    // Write CSV header
+    fprintf(fp, "stream_id,kernel_id,priority,kernel_type,");
+    fprintf(fp, "enqueue_time_ms,start_time_ms,end_time_ms,");
+    fprintf(fp, "duration_ms,launch_latency_ms,e2e_latency_ms,");
+    fprintf(fp, "host_launch_us,host_sync_us\n");
+
+    // Write data rows
+    for (const auto &t : timings) {
+        const char *ktype_str = (t.kernel_type == COMPUTE) ? "compute" :
+                                (t.kernel_type == MEMORY) ? "memory" :
+                                (t.kernel_type == GEMM) ? "gemm" : "mixed";
+
+        fprintf(fp, "%d,%d,%d,%s,", t.stream_id, t.kernel_id, t.priority, ktype_str);
+        fprintf(fp, "%.6f,%.6f,%.6f,", t.enqueue_time_ms, t.start_time_ms, t.end_time_ms);
+        fprintf(fp, "%.6f,%.6f,%.6f,", t.duration_ms, t.launch_latency_ms, t.e2e_latency_ms);
+        fprintf(fp, "%lld,%lld\n", t.host_launch_us, t.host_sync_us);
+    }
+
+    fclose(fp);
+    printf("Raw timing data written to: %s\n", filename.c_str());
 }
 
 // Print detailed trace of kernel execution timeline
@@ -218,12 +251,14 @@ int main(int argc, char **argv) {
         {"heterogeneous", required_argument, 0, 'H'},
         {"launch-frequency", required_argument, 0, 'f'},
         {"debug-trace", no_argument, 0, 'd'},
+        {"csv-output", required_argument, 0, 'o'},
+        {"seed", required_argument, 0, 'S'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "s:k:w:t:p:l:H:f:dh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:k:w:t:p:l:H:f:do:S:h", long_options, NULL)) != -1) {
         switch (opt) {
             case 's':
                 config.num_streams = atoi(optarg);
@@ -312,6 +347,12 @@ int main(int argc, char **argv) {
                 break;
             case 'd':
                 config.debug_trace = true;
+                break;
+            case 'o':
+                config.csv_output_file = optarg;
+                break;
+            case 'S':
+                config.random_seed = (unsigned int)atoi(optarg);
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -457,6 +498,10 @@ int main(int argc, char **argv) {
 
     for (int s = 0; s < config.num_streams; s++) {
         launch_threads.emplace_back([&, s]() {
+            // Initialize random number generator with seed + stream_id for reproducibility
+            std::mt19937 rng(config.random_seed + s);
+            std::uniform_real_distribution<float> jitter_dist(-0.2f, 0.2f); // ±20% jitter
+
             // Determine kernel type for this stream
             KernelType current_kernel_type = config.kernel_type;
             if (config.use_heterogeneous && s < (int)config.kernel_types_per_stream.size()) {
@@ -479,15 +524,24 @@ int main(int argc, char **argv) {
             for (int k = 0; k < kernels_to_launch[s]; k++) {
                 int event_idx = per_stream_event_indices[s][k];
 
-                // Rate limiting: add delay if frequency is specified
+                // Rate limiting: add delay with jitter if frequency is specified
                 if (k > 0 && delay_us > 0) {
-                    std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
+                    // Apply random jitter to simulate realistic arrival patterns
+                    float jitter = (config.random_seed != 0) ? jitter_dist(rng) : 0.0f;
+                    int actual_delay_us = delay_us + (int)(delay_us * jitter);
+                    if (actual_delay_us < 0) actual_delay_us = 0; // Ensure non-negative
+                    std::this_thread::sleep_for(std::chrono::microseconds(actual_delay_us));
                 }
 
                 // Create and record enqueue event
                 auto enqueue_event = make_cuda_event();
                 CUDA_CHECK(cudaEventRecord(*enqueue_event, 0));
                 per_stream_enqueue_events[s].push_back(std::move(enqueue_event));
+
+                // Record host timestamp before kernel launch
+                auto host_launch_time = std::chrono::high_resolution_clock::now();
+                long long host_launch_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                    host_launch_time.time_since_epoch()).count();
 
                 // Record kernel start event
                 CUDA_CHECK(cudaEventRecord(*start_events[event_idx], *streams[s]));
@@ -505,12 +559,24 @@ int main(int argc, char **argv) {
                 timing.kernel_id = k;
                 timing.priority = stream_priorities[s];
                 timing.kernel_type = current_kernel_type;
+                timing.host_launch_us = host_launch_us;
+                timing.host_sync_us = 0; // Will be set after synchronization
 
                 per_stream_timings[s].push_back(timing);
             }
 
             // Synchronize this stream when all its kernels are launched
             CUDA_CHECK(cudaStreamSynchronize(*streams[s]));
+
+            // Record host timestamp after stream synchronization
+            auto host_sync_time = std::chrono::high_resolution_clock::now();
+            long long host_sync_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                host_sync_time.time_since_epoch()).count();
+
+            // Update all kernels in this stream with sync timestamp
+            for (int k = 0; k < kernels_to_launch[s]; k++) {
+                per_stream_timings[s][k].host_sync_us = host_sync_us;
+            }
         });
     }
 
@@ -553,6 +619,11 @@ int main(int argc, char **argv) {
         print_debug_trace(timings, config);
     } else {
         compute_metrics(timings, config, grid.x, block.x);
+    }
+
+    // Write CSV output if requested
+    if (!config.csv_output_file.empty()) {
+        write_timing_csv(timings, config, config.csv_output_file);
     }
 
     // All cleanup is automatic via RAII smart pointers

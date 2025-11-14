@@ -27,11 +27,14 @@ struct BenchmarkConfig {
     std::vector<float> launch_frequency_per_stream; // Launch frequency in Hz per stream (0 = max)
     bool use_heterogeneous; // Enable different kernel types per stream
     bool debug_trace; // Enable detailed debug trace output
+    std::string csv_output_file; // CSV output file path for raw timing data
+    unsigned int random_seed; // Random seed for jitter control
 
     BenchmarkConfig() : num_streams(4), num_kernels_per_stream(10),
                         workload_size(1048576), kernel_type(MIXED),
                         use_heterogeneous(false),
-                        debug_trace(false) {}
+                        debug_trace(false), csv_output_file(""),
+                        random_seed(0) {}
 };
 
 // Timing information per kernel
@@ -46,6 +49,9 @@ struct KernelTiming {
     float duration_ms;          // Execution time: end_time - start_time
     float launch_latency_ms;    // Queue wait time: start_time - enqueue_time
     float e2e_latency_ms;       // End-to-end latency: end_time - enqueue_time
+    // Host-side timestamps (microseconds since epoch)
+    long long host_launch_us;   // Host timestamp when kernel launch was initiated
+    long long host_sync_us;     // Host timestamp when synchronization completed
 };
 
 #endif // COMMON_H
