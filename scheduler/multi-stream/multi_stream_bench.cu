@@ -95,7 +95,78 @@ void print_usage(const char *prog_name) {
     printf("  -p, --priority          Enable stream priorities\n");
     printf("  -l, --load-imbalance SPEC  Custom kernels per stream (e.g., \"5,10,20,40\")\n");
     printf("  -H, --heterogeneous SPEC   Heterogeneous kernel types (e.g., \"memory,memory,compute,compute\")\n");
+    printf("  -d, --debug-trace       Enable detailed debug trace output (skips regular metrics)\n");
     printf("  -h, --help              Show this help message\n");
+}
+
+// Print detailed trace of kernel execution timeline
+void print_debug_trace(const std::vector<KernelTiming> &timings, const BenchmarkConfig &config) {
+    printf("\n====================================\n");
+    printf("DEBUG TRACE: Kernel Execution Timeline\n");
+    printf("====================================\n");
+    printf("Configuration: %d streams, %d kernels per stream, priorities=%s\n\n",
+           config.num_streams, config.num_kernels_per_stream,
+           config.enable_priorities ? "enabled" : "disabled");
+
+    printf("%-8s %-8s %-9s %-12s %-12s %-12s %-12s %-12s %-12s\n",
+           "Stream", "Kernel", "Priority", "Enqueue(ms)", "Start(ms)", "End(ms)",
+           "QueueWait", "Exec", "E2E");
+    printf("------------------------------------------------------------------------");
+    printf("------------------------------------------------------------\n");
+
+    // Sort timings by enqueue time to show launch order
+    std::vector<KernelTiming> sorted_timings = timings;
+    std::sort(sorted_timings.begin(), sorted_timings.end(),
+              [](const KernelTiming& a, const KernelTiming& b) {
+                  return a.enqueue_time_ms < b.enqueue_time_ms;
+              });
+
+    for (const auto &t : sorted_timings) {
+        printf("%-8d %-8d %-9d %-12.3f %-12.3f %-12.3f %-12.3f %-12.3f %-12.3f\n",
+               t.stream_id, t.kernel_id, t.priority,
+               t.enqueue_time_ms, t.start_time_ms, t.end_time_ms,
+               t.launch_latency_ms, t.duration_ms, t.e2e_latency_ms);
+    }
+
+    printf("\n");
+
+    // Analyze scheduling behavior
+    if (config.enable_priorities) {
+        printf("Priority Scheduling Analysis:\n");
+
+        // Count inversions where high-priority started after low-priority
+        int inversions = 0;
+        for (size_t i = 0; i < timings.size(); i++) {
+            for (size_t j = i + 1; j < timings.size(); j++) {
+                if (timings[i].priority < timings[j].priority &&
+                    timings[i].start_time_ms > timings[j].start_time_ms &&
+                    timings[j].end_time_ms > timings[i].start_time_ms) {
+                    inversions++;
+                    printf("  Inversion: Stream %d Kernel %d (pri=%d) started at %.3fms after Stream %d Kernel %d (pri=%d) at %.3fms\n",
+                           timings[i].stream_id, timings[i].kernel_id, timings[i].priority, timings[i].start_time_ms,
+                           timings[j].stream_id, timings[j].kernel_id, timings[j].priority, timings[j].start_time_ms);
+                }
+            }
+        }
+
+        printf("  Total priority inversions: %d\n", inversions);
+
+        // Show per-priority statistics
+        std::map<int, std::vector<float>> priority_e2e;
+        for (const auto &t : timings) {
+            priority_e2e[t.priority].push_back(t.e2e_latency_ms);
+        }
+
+        printf("\nPer-Priority E2E Latency:\n");
+        for (const auto &pair : priority_e2e) {
+            float sum = 0.0f;
+            for (float lat : pair.second) sum += lat;
+            float avg = sum / pair.second.size();
+            printf("  Priority %d: %.3f ms (n=%zu)\n", pair.first, avg, pair.second.size());
+        }
+    }
+
+    printf("====================================\n\n");
 }
 
 int main(int argc, char **argv) {
@@ -110,12 +181,13 @@ int main(int argc, char **argv) {
         {"priority", no_argument, 0, 'p'},
         {"load-imbalance", required_argument, 0, 'l'},
         {"heterogeneous", required_argument, 0, 'H'},
+        {"debug-trace", no_argument, 0, 'd'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "s:k:w:t:pl:H:h", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:k:w:t:pl:H:dh", long_options, NULL)) != -1) {
         switch (opt) {
             case 's':
                 config.num_streams = atoi(optarg);
@@ -176,6 +248,9 @@ int main(int argc, char **argv) {
                         config.num_streams = config.kernel_types_per_stream.size();
                     }
                 }
+                break;
+            case 'd':
+                config.debug_trace = true;
                 break;
             case 'h':
                 print_usage(argv[0]);
@@ -394,8 +469,12 @@ int main(int argc, char **argv) {
         timings[i].e2e_latency_ms = timings[i].duration_ms - timings[i].launch_latency_ms;
     }
 
-    // Compute and print metrics
-    compute_metrics(timings, config, grid.x, block.x);
+    // Output results based on mode
+    if (config.debug_trace) {
+        print_debug_trace(timings, config);
+    } else {
+        compute_metrics(timings, config, grid.x, block.x);
+    }
 
     // All cleanup is automatic via RAII smart pointers
 

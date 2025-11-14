@@ -25,10 +25,12 @@ struct BenchmarkConfig {
     std::vector<int> kernels_per_stream_custom; // For load imbalance experiments
     std::vector<KernelType> kernel_types_per_stream; // For heterogeneous workloads
     bool use_heterogeneous; // Enable different kernel types per stream
+    bool debug_trace; // Enable detailed debug trace output
 
     BenchmarkConfig() : num_streams(4), num_kernels_per_stream(10),
                         workload_size(1048576), kernel_type(MIXED),
-                        enable_priorities(false), use_heterogeneous(false) {}
+                        enable_priorities(false), use_heterogeneous(false),
+                        debug_trace(false) {}
 };
 
 // Timing information per kernel
