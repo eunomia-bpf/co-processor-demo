@@ -9,7 +9,7 @@ multi_stream_bench
 *.cubin
 *.ptx
 *.fatbin
-
+__pycache__/
 # Build artifacts
 *.exe
 *.out
