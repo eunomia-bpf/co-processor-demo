@@ -82,40 +82,25 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
     }
     avg_launch_latency /= total_kernels;
 
-    // Priority inversion detection and per-priority latency (if priorities enabled)
+    // Priority inversion detection and per-priority latency
     int priority_inversions = 0;
-    float high_priority_e2e_latency = 0.0f;
-    float low_priority_e2e_latency = 0.0f;
-    int high_priority_count = 0;
-    int low_priority_count = 0;
+    std::map<int, std::vector<float>> priority_latencies; // priority -> list of e2e latencies
 
-    if (config.enable_priorities) {
-        // Detect inversions
-        for (size_t i = 0; i < timings.size(); i++) {
-            for (size_t j = i + 1; j < timings.size(); j++) {
-                // If higher priority (lower number) started later than lower priority
-                if (timings[i].priority < timings[j].priority &&
-                    timings[i].start_time_ms > timings[j].start_time_ms &&
-                    timings[j].end_time_ms > timings[i].start_time_ms) {
-                    priority_inversions++;
-                }
+    // Detect inversions
+    for (size_t i = 0; i < timings.size(); i++) {
+        for (size_t j = i + 1; j < timings.size(); j++) {
+            // If higher priority (lower number) started later than lower priority
+            if (timings[i].priority < timings[j].priority &&
+                timings[i].start_time_ms > timings[j].start_time_ms &&
+                timings[j].end_time_ms > timings[i].start_time_ms) {
+                priority_inversions++;
             }
         }
+    }
 
-        // Compute per-priority-class latency
-        // High priority: -5, -4; Low priority: -2, 0
-        for (const auto &t : timings) {
-            if (t.priority == -5 || t.priority == -4) {
-                high_priority_e2e_latency += t.e2e_latency_ms;
-                high_priority_count++;
-            } else if (t.priority == -2 || t.priority == 0) {
-                low_priority_e2e_latency += t.e2e_latency_ms;
-                low_priority_count++;
-            }
-        }
-
-        if (high_priority_count > 0) high_priority_e2e_latency /= high_priority_count;
-        if (low_priority_count > 0) low_priority_e2e_latency /= low_priority_count;
+    // Collect per-priority latencies
+    for (const auto &t : timings) {
+        priority_latencies[t.priority].push_back(t.e2e_latency_ms);
     }
 
     // Scheduler overhead (approximate)
@@ -199,24 +184,33 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
     printf("  L2 cache size: %.2f MB\n", l2_cache_mb);
     printf("  Fits in L2: %s\n", fits_in_l2 ? "YES" : "NO");
 
-    if (config.enable_priorities) {
+    if (!priority_latencies.empty() && priority_latencies.size() > 1) {
         printf("\nPriority Metrics:\n");
         printf("  Priority inversions detected: %d\n", priority_inversions);
-        if (high_priority_count > 0 && low_priority_count > 0) {
-            printf("  High-priority avg E2E latency: %.3f ms (n=%d)\n",
-                   high_priority_e2e_latency, high_priority_count);
-            printf("  Low-priority avg E2E latency: %.3f ms (n=%d)\n",
-                   low_priority_e2e_latency, low_priority_count);
-            printf("  Latency ratio (high/low): %.3f\n",
-                   high_priority_e2e_latency / low_priority_e2e_latency);
+
+        printf("  Per-Priority E2E Latency:\n");
+        for (const auto &pair : priority_latencies) {
+            std::vector<float> sorted_lats = pair.second;
+            std::sort(sorted_lats.begin(), sorted_lats.end());
+
+            float sum = 0.0f;
+            for (float lat : sorted_lats) sum += lat;
+            float avg = sum / sorted_lats.size();
+            float p50 = sorted_lats[sorted_lats.size() / 2];
+            float p99 = sorted_lats[(sorted_lats.size() * 99) / 100];
+
+            printf("    Priority %d: avg=%.3fms, P50=%.3fms, P99=%.3fms (n=%zu)\n",
+                   pair.first, avg, p50, p99, sorted_lats.size());
         }
     }
     printf("====================================\n\n");
 
     // CSV output for easy parsing
     printf("CSV: streams,kernels_per_stream,total_kernels,type,wall_time_ms,throughput,mean_lat,p50,p95,p99,");
-    printf("concurrent_rate,overhead,util,jains_index,max_concurrent,avg_concurrent,inversions,working_set_mb,fits_in_l2,stddev,grid_size,block_size,priority_enabled,high_pri_e2e_lat,low_pri_e2e_lat\n");
-    printf("CSV: %d,%d,%d,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.4f,%d,%.2f,%d,%.2f,%d,%.2f,%d,%d,%d,%.3f,%.3f\n",
+    printf("concurrent_rate,overhead,util,jains_index,max_concurrent,avg_concurrent,inversions,working_set_mb,fits_in_l2,stddev,grid_size,block_size,");
+    printf("per_priority_avg,per_priority_p50,per_priority_p99\n");
+
+    printf("CSV: %d,%d,%d,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.4f,%d,%.2f,%d,%.2f,%d,%.2f,%d,%d,",
            config.num_streams, config.num_kernels_per_stream, total_kernels,
            config.kernel_type == COMPUTE ? "compute" :
            config.kernel_type == MEMORY ? "memory" :
@@ -224,9 +218,61 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
            total_wall_time, throughput, avg_latency, p50, p95, p99,
            concurrent_rate, scheduler_overhead, gpu_utilization,
            jains_index, max_concurrent, avg_concurrent, priority_inversions,
-           working_set_mb, fits_in_l2 ? 1 : 0, stddev, grid_x, block_x,
-           config.enable_priorities ? 1 : 0,
-           high_priority_e2e_latency, low_priority_e2e_latency);
+           working_set_mb, fits_in_l2 ? 1 : 0, stddev, grid_x, block_x);
+
+    // Output per-priority metrics in three separate fields
+    // Each field contains colon-separated values for each priority
+    // Format: per_priority_avg = val1:val2:val3, per_priority_p50 = val1:val2:val3, etc.
+
+    // Compute metrics for each priority
+    std::map<int, float> priority_avg, priority_p50_map, priority_p99_map;
+    for (const auto &pair : priority_latencies) {
+        std::vector<float> sorted_lats = pair.second;
+        std::sort(sorted_lats.begin(), sorted_lats.end());
+
+        float sum = 0.0f;
+        for (float lat : sorted_lats) sum += lat;
+        float avg = sum / sorted_lats.size();
+        float p50_val = sorted_lats[sorted_lats.size() / 2];
+        float p99_val = sorted_lats[(sorted_lats.size() * 99) / 100];
+
+        priority_avg[pair.first] = avg;
+        priority_p50_map[pair.first] = p50_val;
+        priority_p99_map[pair.first] = p99_val;
+    }
+
+    // Output avg values
+    if (!priority_avg.empty()) {
+        bool first = true;
+        for (const auto &pair : priority_avg) {
+            if (!first) printf(":");
+            printf("%.3f", pair.second);
+            first = false;
+        }
+    }
+    printf(",");
+
+    // Output p50 values
+    if (!priority_p50_map.empty()) {
+        bool first = true;
+        for (const auto &pair : priority_p50_map) {
+            if (!first) printf(":");
+            printf("%.3f", pair.second);
+            first = false;
+        }
+    }
+    printf(",");
+
+    // Output p99 values
+    if (!priority_p99_map.empty()) {
+        bool first = true;
+        for (const auto &pair : priority_p99_map) {
+            if (!first) printf(":");
+            printf("%.3f", pair.second);
+            first = false;
+        }
+    }
+    printf("\n");
 }
 
 // ============================================================================
@@ -271,7 +317,7 @@ inline int detect_priority_inversions(const std::vector<KernelTiming> &timings) 
  */
 inline void compute_priority_class_latency(const std::vector<KernelTiming> &timings,
                                           const BenchmarkConfig &config) {
-    if (!config.enable_priorities || timings.empty()) {
+    if (config.priorities_per_stream.empty() || timings.empty()) {
         return;
     }
 
@@ -334,7 +380,7 @@ inline void output_rq3_detailed_csv(const std::vector<KernelTiming> &timings) {
  */
 inline int compute_rq3_metrics(const std::vector<KernelTiming> &timings,
                                const BenchmarkConfig &config) {
-    if (!config.enable_priorities) {
+    if (config.priorities_per_stream.empty()) {
         return 0;
     }
 

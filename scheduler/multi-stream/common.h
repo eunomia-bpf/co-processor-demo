@@ -21,15 +21,16 @@ struct BenchmarkConfig {
     int num_kernels_per_stream;
     int workload_size;
     KernelType kernel_type;
-    bool enable_priorities;
+    std::vector<int> priorities_per_stream; // Priority per stream (e.g., -5,-4,-2,0)
     std::vector<int> kernels_per_stream_custom; // For load imbalance experiments
     std::vector<KernelType> kernel_types_per_stream; // For heterogeneous workloads
+    std::vector<float> launch_frequency_per_stream; // Launch frequency in Hz per stream (0 = max)
     bool use_heterogeneous; // Enable different kernel types per stream
     bool debug_trace; // Enable detailed debug trace output
 
     BenchmarkConfig() : num_streams(4), num_kernels_per_stream(10),
                         workload_size(1048576), kernel_type(MIXED),
-                        enable_priorities(false), use_heterogeneous(false),
+                        use_heterogeneous(false),
                         debug_trace(false) {}
 };
 

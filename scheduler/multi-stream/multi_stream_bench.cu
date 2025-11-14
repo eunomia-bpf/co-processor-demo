@@ -11,6 +11,8 @@
 #include <thread>
 #include <mutex>
 #include <map>
+#include <string>
+#include <chrono>
 #include "common.h"
 #include "metrics.h"
 
@@ -92,9 +94,10 @@ void print_usage(const char *prog_name) {
     printf("  -k, --kernels NUM       Kernels per stream (default: 10)\n");
     printf("  -w, --size NUM          Workload size in elements (default: 1048576)\n");
     printf("  -t, --type TYPE         Kernel type: compute|memory|mixed|gemm (default: mixed)\n");
-    printf("  -p, --priority          Enable stream priorities\n");
+    printf("  -p, --priority SPEC     Priority per stream (e.g., \"-5,-4,-2,0\")\n");
     printf("  -l, --load-imbalance SPEC  Custom kernels per stream (e.g., \"5,10,20,40\")\n");
     printf("  -H, --heterogeneous SPEC   Heterogeneous kernel types (e.g., \"memory,memory,compute,compute\")\n");
+    printf("  -f, --launch-frequency SPEC  Launch frequency per stream in Hz (e.g., \"100,100,20,20\", 0=max)\n");
     printf("  -d, --debug-trace       Enable detailed debug trace output (skips regular metrics)\n");
     printf("  -h, --help              Show this help message\n");
 }
@@ -106,7 +109,7 @@ void print_debug_trace(const std::vector<KernelTiming> &timings, const Benchmark
     printf("====================================\n");
     printf("Configuration: %d streams, %d kernels per stream, priorities=%s\n\n",
            config.num_streams, config.num_kernels_per_stream,
-           config.enable_priorities ? "enabled" : "disabled");
+           config.priorities_per_stream.empty() ? "disabled" : "enabled");
 
     printf("%-8s %-8s %-9s %-12s %-12s %-12s %-12s %-12s %-12s\n",
            "Stream", "Kernel", "Priority", "Enqueue(ms)", "Start(ms)", "End(ms)",
@@ -131,7 +134,7 @@ void print_debug_trace(const std::vector<KernelTiming> &timings, const Benchmark
     printf("\n");
 
     // Analyze scheduling behavior
-    if (config.enable_priorities) {
+    if (!config.priorities_per_stream.empty()) {
         printf("Priority Scheduling Analysis:\n");
 
         // Count inversions where high-priority started after low-priority
@@ -159,10 +162,42 @@ void print_debug_trace(const std::vector<KernelTiming> &timings, const Benchmark
 
         printf("\nPer-Priority E2E Latency:\n");
         for (const auto &pair : priority_e2e) {
+            // Sort for percentile calculation
+            std::vector<float> sorted_lats = pair.second;
+            std::sort(sorted_lats.begin(), sorted_lats.end());
+
             float sum = 0.0f;
-            for (float lat : pair.second) sum += lat;
-            float avg = sum / pair.second.size();
-            printf("  Priority %d: %.3f ms (n=%zu)\n", pair.first, avg, pair.second.size());
+            for (float lat : sorted_lats) sum += lat;
+            float avg = sum / sorted_lats.size();
+
+            float p50 = sorted_lats[sorted_lats.size() / 2];
+            float p99 = sorted_lats[(sorted_lats.size() * 99) / 100];
+
+            printf("  Priority %d: avg=%.3fms, P50=%.3fms, P99=%.3fms (n=%zu)\n",
+                   pair.first, avg, p50, p99, sorted_lats.size());
+        }
+
+        // Show per-stream statistics
+        std::map<int, std::vector<float>> stream_e2e;
+        for (const auto &t : timings) {
+            stream_e2e[t.stream_id].push_back(t.e2e_latency_ms);
+        }
+
+        printf("\nPer-Stream E2E Latency:\n");
+        for (const auto &pair : stream_e2e) {
+            // Sort for percentile calculation
+            std::vector<float> sorted_lats = pair.second;
+            std::sort(sorted_lats.begin(), sorted_lats.end());
+
+            float sum = 0.0f;
+            for (float lat : sorted_lats) sum += lat;
+            float avg = sum / sorted_lats.size();
+
+            float p50 = sorted_lats[sorted_lats.size() / 2];
+            float p99 = sorted_lats[(sorted_lats.size() * 99) / 100];
+
+            printf("  Stream %d: avg=%.3fms, P50=%.3fms, P99=%.3fms (n=%zu)\n",
+                   pair.first, avg, p50, p99, sorted_lats.size());
         }
     }
 
@@ -178,16 +213,17 @@ int main(int argc, char **argv) {
         {"kernels", required_argument, 0, 'k'},
         {"size", required_argument, 0, 'w'},
         {"type", required_argument, 0, 't'},
-        {"priority", no_argument, 0, 'p'},
+        {"priority", required_argument, 0, 'p'},
         {"load-imbalance", required_argument, 0, 'l'},
         {"heterogeneous", required_argument, 0, 'H'},
+        {"launch-frequency", required_argument, 0, 'f'},
         {"debug-trace", no_argument, 0, 'd'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "s:k:w:t:pl:H:dh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:k:w:t:p:l:H:f:dh", long_options, NULL)) != -1) {
         switch (opt) {
             case 's':
                 config.num_streams = atoi(optarg);
@@ -209,7 +245,18 @@ int main(int argc, char **argv) {
                 }
                 break;
             case 'p':
-                config.enable_priorities = true;
+                {
+                    // Parse comma-separated list of priorities per stream
+                    char *token = strtok(optarg, ",");
+                    while (token != NULL) {
+                        config.priorities_per_stream.push_back(atoi(token));
+                        token = strtok(NULL, ",");
+                    }
+                    // Override num_streams if custom specified
+                    if (!config.priorities_per_stream.empty()) {
+                        config.num_streams = config.priorities_per_stream.size();
+                    }
+                }
                 break;
             case 'l':
                 {
@@ -249,6 +296,20 @@ int main(int argc, char **argv) {
                     }
                 }
                 break;
+            case 'f':
+                {
+                    // Parse comma-separated list of launch frequencies per stream
+                    char *token = strtok(optarg, ",");
+                    while (token != NULL) {
+                        config.launch_frequency_per_stream.push_back(atof(token));
+                        token = strtok(NULL, ",");
+                    }
+                    // Override num_streams if custom specified
+                    if (!config.launch_frequency_per_stream.empty()) {
+                        config.num_streams = config.launch_frequency_per_stream.size();
+                    }
+                }
+                break;
             case 'd':
                 config.debug_trace = true;
                 break;
@@ -267,6 +328,7 @@ int main(int argc, char **argv) {
     cudaDeviceProp prop;
     CUDA_CHECK(cudaGetDeviceProperties(&prop, 0));
     printf("Running on: %s\n", prop.name);
+
 
     // Allocate device memory using RAII
     std::vector<cuda_unique_ptr<float>> d_data;
@@ -297,20 +359,20 @@ int main(int argc, char **argv) {
     streams.reserve(config.num_streams);
     stream_priorities.reserve(config.num_streams);
 
-    if (config.enable_priorities) {
+    if (!config.priorities_per_stream.empty()) {
+        // Use custom priorities specified by user
         int least_priority, greatest_priority;
         CUDA_CHECK(cudaDeviceGetStreamPriorityRange(&least_priority, &greatest_priority));
         printf("Stream priority range: %d (high) to %d (low)\n", greatest_priority, least_priority);
 
         for (int i = 0; i < config.num_streams; i++) {
-            // Assign priorities: distribute evenly across range
-            int priority = greatest_priority +
-                          (i * (least_priority - greatest_priority)) / (config.num_streams - 1);
+            int priority = config.priorities_per_stream[i];
             stream_priorities.push_back(priority);
             streams.emplace_back(make_cuda_stream(priority, true));
             printf("Stream %d created with priority %d\n", i, priority);
         }
     } else {
+        // No priorities specified, use default priority (0) for all streams
         for (int i = 0; i < config.num_streams; i++) {
             stream_priorities.push_back(0);
             streams.emplace_back(make_cuda_stream());
@@ -401,9 +463,26 @@ int main(int argc, char **argv) {
                 current_kernel_type = config.kernel_types_per_stream[s];
             }
 
+            // Get launch frequency for this stream (0 = max rate)
+            float launch_freq_hz = 0.0f;
+            if (!config.launch_frequency_per_stream.empty() && s < (int)config.launch_frequency_per_stream.size()) {
+                launch_freq_hz = config.launch_frequency_per_stream[s];
+            }
+
+            // Calculate delay between launches in microseconds
+            int delay_us = 0;
+            if (launch_freq_hz > 0.0f) {
+                delay_us = (int)(1000000.0f / launch_freq_hz);
+            }
+
             // Launch all kernels for this stream
             for (int k = 0; k < kernels_to_launch[s]; k++) {
                 int event_idx = per_stream_event_indices[s][k];
+
+                // Rate limiting: add delay if frequency is specified
+                if (k > 0 && delay_us > 0) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(delay_us));
+                }
 
                 // Create and record enqueue event
                 auto enqueue_event = make_cuda_event();
