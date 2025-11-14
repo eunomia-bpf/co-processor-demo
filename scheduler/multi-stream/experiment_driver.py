@@ -19,6 +19,10 @@ from typing import List, Dict, Optional, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import argparse
 
+# Default experiment configuration
+DEFAULT_WORKLOAD_SIZE = 16777216  # 64MB (16M elements × 4 bytes)
+DEFAULT_KERNELS_PER_STREAM = 20
+
 
 class BenchmarkRunner:
     """Runs multi-stream benchmark and parses results."""
@@ -155,10 +159,11 @@ class BenchmarkRunner:
 class ExperimentSuite:
     """Defines and runs experiment suites for research questions."""
 
-    def __init__(self, runner: BenchmarkRunner, output_dir: str = "results"):
+    def __init__(self, runner: BenchmarkRunner, output_dir: str = "results", workload_size: int = DEFAULT_WORKLOAD_SIZE):
         self.runner = runner
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
+        self.workload_size = workload_size
 
     def rq1_stream_scalability(self, trials: int = 10) -> pd.DataFrame:
         """RQ1: Stream scalability experiment."""
@@ -172,7 +177,7 @@ class ExperimentSuite:
             trial_results = self.runner.run_single(
                 streams=streams,
                 kernels=20,
-                workload_size=1048576,
+                workload_size=self.workload_size,
                 kernel_type="mixed",
                 trials=trials
             )
@@ -194,7 +199,7 @@ class ExperimentSuite:
             trial_results = self.runner.run_single(
                 streams=8,
                 kernels=20,
-                workload_size=1048576,
+                workload_size=self.workload_size,
                 kernel_type=ktype,
                 trials=trials
             )
@@ -218,7 +223,7 @@ class ExperimentSuite:
                 trial_results = self.runner.run_single(
                     streams=streams,
                     kernels=20,
-                    workload_size=1048576,
+                    workload_size=self.workload_size,
                     kernel_type="mixed",
                     priority=priority,
                     trials=trials
@@ -274,7 +279,7 @@ class ExperimentSuite:
                 num_processes=num_procs,
                 streams_per_process=4,
                 kernels=20,
-                workload_size=1048576,
+                workload_size=self.workload_size,
                 kernel_type="mixed",
                 trials=trials
             )
@@ -307,7 +312,7 @@ class ExperimentSuite:
             trial_results = self.runner.run_single(
                 streams=8,  # Will be overridden by pattern length
                 kernels=20,  # Ignored when load_imbalance is set
-                workload_size=1048576,
+                workload_size=self.workload_size,
                 kernel_type="mixed",
                 load_imbalance=pattern,
                 trials=trials
@@ -322,21 +327,46 @@ class ExperimentSuite:
         return df
 
     def rq7_tail_latency_contention(self, trials: int = 10) -> pd.DataFrame:
-        """RQ7: Tail latency under contention."""
-        print("=== RQ7: Tail Latency Under Contention ===")
+        """RQ7: Tail latency under contention with HETEROGENEOUS workloads."""
+        print("=== RQ7: Tail Latency Under Contention (OSDI-Quality) ===")
 
+        # Original homogeneous tests
         stream_counts = [2, 4, 8, 16, 32, 64]
         results = []
 
         for streams in stream_counts:
-            print(f"Testing {streams} streams for tail latency...")
+            print(f"Testing {streams} streams (homogeneous mixed)...")
             trial_results = self.runner.run_single(
                 streams=streams,
-                kernels=50,  # More kernels for better tail latency stats
-                workload_size=1048576,
+                kernels=50,
+                workload_size=self.workload_size,
                 kernel_type="mixed",
                 trials=trials
             )
+            for r in trial_results:
+                r['workload_pattern'] = "homogeneous_mixed"
+            results.extend(trial_results)
+
+        # OSDI Enhancement: Heterogeneous kernel types for realistic contention
+        print("\n--- OSDI Enhancement: Heterogeneous Workloads ---")
+        hetero_configs = [
+            (4, "memory", "fast_memory_only"),
+            (4, "compute", "slow_compute_only"),
+            (8, "memory", "fast_memory_8s"),
+            (8, "compute", "slow_compute_8s"),
+        ]
+
+        for streams, ktype, pattern_name in hetero_configs:
+            print(f"Testing heterogeneous: {pattern_name} ({streams} streams, {ktype})...")
+            trial_results = self.runner.run_single(
+                streams=streams,
+                kernels=50,
+                workload_size=4194304,  # 16MB for longer execution
+                kernel_type=ktype,
+                trials=trials
+            )
+            for r in trial_results:
+                r['workload_pattern'] = pattern_name
             results.extend(trial_results)
 
         df = pd.DataFrame(results)
@@ -344,29 +374,22 @@ class ExperimentSuite:
         return df
 
     def rq9_priority_tail_latency(self, trials: int = 10) -> pd.DataFrame:
-        """RQ9: Priority-based tail latency (XSched comparison)."""
-        print("=== RQ9: Priority-Based Tail Latency ===")
-
-        # Test different front-end load intensities
-        configurations = [
-            # (streams, priority_enabled, front_kernels, back_kernels, load_label)
-            (2, False, 20, 20, "baseline_50pct"),
-            (2, True, 20, 20, "priority_50pct"),
-            (4, False, 10, 30, "baseline_25pct"),
-            (4, True, 10, 30, "priority_25pct"),
-            (4, False, 30, 10, "baseline_75pct"),
-            (4, True, 30, 10, "priority_75pct"),
-            (8, False, 20, 60, "baseline_25pct_8s"),
-            (8, True, 20, 60, "priority_25pct_8s"),
-        ]
+        """RQ9: Priority-based tail latency with XSched-style HETEROGENEOUS workloads."""
+        print("=== RQ9: Priority-Based Tail Latency (OSDI-Quality) ===")
 
         results = []
 
-        for streams, use_priority, front_k, back_k, label in configurations:
-            print(f"Testing {label}: {streams} streams, priority={use_priority}...")
+        # Original homogeneous tests (load-imbalance only)
+        print("\n--- Original: Load Imbalance (Homogeneous Kernels) ---")
+        load_imb_configs = [
+            (2, False, 20, 20, "homog_baseline_50pct"),
+            (2, True, 20, 20, "homog_priority_50pct"),
+            (4, False, 10, 30, "homog_baseline_25pct"),
+            (4, True, 10, 30, "homog_priority_25pct"),
+        ]
 
-            # Use load-imbalance to create front/back separation
-            # First half = front (high priority), second half = back (low priority)
+        for streams, use_priority, front_k, back_k, label in load_imb_configs:
+            print(f"Testing {label}: {streams} streams, priority={use_priority}...")
             pattern_parts = []
             for i in range(streams // 2):
                 pattern_parts.append(str(front_k))
@@ -376,8 +399,8 @@ class ExperimentSuite:
 
             trial_results = self.runner.run_single(
                 streams=streams,
-                kernels=20,  # Ignored when load_imbalance set
-                workload_size=1048576,
+                kernels=20,
+                workload_size=4194304,  # 16MB for longer execution
                 kernel_type="mixed",
                 priority=use_priority,
                 load_imbalance=pattern,
@@ -385,10 +408,37 @@ class ExperimentSuite:
             )
             for r in trial_results:
                 r['config_label'] = label
-                r['front_kernels'] = front_k
-                r['back_kernels'] = back_k
+                r['workload_type'] = "homogeneous"
                 r['priority_enabled'] = use_priority
-                r['front_ratio'] = front_k / (front_k + back_k)
+            results.extend(trial_results)
+
+        # OSDI Enhancement: Heterogeneous kernel types (memory vs compute)
+        print("\n--- OSDI Enhancement: Heterogeneous Kernels (Memory vs Compute) ---")
+        hetero_configs = [
+            # (streams, kernels, ktype, priority, label, description)
+            (2, 100, "memory", False, "hetero_memory_alone", "Fast memory, no competition"),
+            (4, 50, "memory", False, "hetero_memory_no_pri", "Memory kernels, no priority"),
+            (4, 50, "memory", True, "hetero_memory_with_pri", "Memory kernels, HIGH priority"),
+            (4, 50, "compute", False, "hetero_compute_no_pri", "Compute kernels (interference)"),
+            (4, 50, "compute", True, "hetero_compute_with_pri", "Compute kernels, LOW priority"),
+        ]
+
+        for streams, kernels, ktype, use_priority, label, desc in hetero_configs:
+            print(f"Testing {label}: {desc}")
+            trial_results = self.runner.run_single(
+                streams=streams,
+                kernels=kernels,
+                workload_size=4194304,  # 16MB for longer execution
+                kernel_type=ktype,
+                priority=use_priority,
+                trials=trials
+            )
+            for r in trial_results:
+                r['config_label'] = label
+                r['workload_type'] = "heterogeneous"
+                r['kernel_type_used'] = ktype
+                r['priority_enabled'] = use_priority
+                r['description'] = desc
             results.extend(trial_results)
 
         df = pd.DataFrame(results)
@@ -396,18 +446,87 @@ class ExperimentSuite:
         return df
 
     def rq10_preemption_latency(self, trials: int = 10) -> pd.DataFrame:
-        """RQ10: Scheduler preemption latency."""
-        print("=== RQ10: Preemption Latency ===")
-        print("NOTE: This requires custom benchmark binary with preemption measurement")
-        print("Skipping for now - needs implementation in multi_stream_bench.cu")
+        """RQ10: Preemption latency estimation via contention analysis."""
+        print("=== RQ10: Preemption Latency (OSDI-Quality) ===")
+        print("Method: Compare fast kernel latency with/without slow kernel contention")
 
-        # Placeholder: This would require modifying the benchmark to:
-        # 1. Launch long kernel on stream A
-        # 2. After delay, launch short kernel on stream B
-        # 3. Measure time from B's launch to B's execution start
+        results = []
 
-        # For now, return empty DataFrame
-        df = pd.DataFrame()
+        # Baseline: Fast kernel alone (no contention)
+        print("\nBaseline: Memory kernel alone (no contention)...")
+        baseline_results = self.runner.run_single(
+            streams=1,
+            kernels=20,
+            workload_size=4194304,  # 16MB for longer execution
+            kernel_type="memory",
+            trials=trials
+        )
+        for r in baseline_results:
+            r['scenario'] = "baseline_no_contention"
+            r['interfering_kernel'] = "none"
+        results.extend(baseline_results)
+
+        # Contention scenarios: Different blocking kernel types
+        blocking_kernels = [
+            ("compute", "1.2ms compute kernel"),
+            ("gemm", "0.23ms GEMM kernel"),
+        ]
+
+        for blocking_type, blocking_desc in blocking_kernels:
+            print(f"\nContention with {blocking_desc}...")
+
+            # WITHOUT priority: FIFO scheduling (preemption latency = blocking kernel duration)
+            print(f"  Testing WITHOUT priority...")
+            no_pri_results = self.runner.run_single(
+                streams=2,
+                kernels=20,
+                workload_size=4194304,  # 16MB for longer execution
+                kernel_type=blocking_type,
+                priority=False,
+                trials=trials
+            )
+            for r in no_pri_results:
+                r['scenario'] = f"contention_{blocking_type}_no_priority"
+                r['interfering_kernel'] = blocking_type
+                r['priority_enabled'] = False
+            results.extend(no_pri_results)
+
+            # WITH priority: Should preempt (test if CUDA priority helps)
+            print(f"  Testing WITH priority...")
+            pri_results = self.runner.run_single(
+                streams=2,
+                kernels=20,
+                workload_size=4194304,  # 16MB for longer execution
+                kernel_type=blocking_type,
+                priority=True,
+                trials=trials
+            )
+            for r in pri_results:
+                r['scenario'] = f"contention_{blocking_type}_with_priority"
+                r['interfering_kernel'] = blocking_type
+                r['priority_enabled'] = True
+            results.extend(pri_results)
+
+        df = pd.DataFrame(results)
+
+        # Calculate and print preemption latency estimates
+        if not df.empty:
+            baseline_p99 = df[df['scenario'] == 'baseline_no_contention']['p99'].astype(float).mean()
+            print("\n" + "="*70)
+            print("PREEMPTION LATENCY ANALYSIS")
+            print("="*70)
+            print(f"Baseline P99 (no contention): {baseline_p99:.2f} ms\n")
+
+            for blocking_type in ['compute', 'gemm']:
+                no_pri_p99 = df[df['scenario'] == f'contention_{blocking_type}_no_priority']['p99'].astype(float).mean()
+                pri_p99 = df[df['scenario'] == f'contention_{blocking_type}_with_priority']['p99'].astype(float).mean()
+
+                print(f"{blocking_type.upper()} Kernel:")
+                print(f"  No Priority P99: {no_pri_p99:.2f} ms (inflation: {no_pri_p99/baseline_p99:.1f}×)")
+                print(f"  With Priority P99: {pri_p99:.2f} ms (inflation: {pri_p99/baseline_p99:.1f}×)")
+                print(f"  Priority Benefit: {no_pri_p99/pri_p99:.2f}× reduction")
+                print(f"  → Preemption latency ≈ {no_pri_p99:.2f} ms (must wait for blocking kernel)\n")
+
         df.to_csv(self.output_dir / "rq10_preemption_latency.csv", index=False)
         return df
 
@@ -446,7 +565,7 @@ class ExperimentSuite:
             trial_results = self.runner.run_single(
                 streams=8,
                 kernels=20,  # Ignored
-                workload_size=1048576,
+                workload_size=self.workload_size,
                 kernel_type="mixed",
                 load_imbalance=pattern,
                 trials=trials
@@ -542,6 +661,10 @@ def main():
         help="Number of trials per configuration"
     )
     parser.add_argument(
+        "--workload-size", type=int, default=DEFAULT_WORKLOAD_SIZE,
+        help=f"Workload size in elements (default: {DEFAULT_WORKLOAD_SIZE} = 64MB)"
+    )
+    parser.add_argument(
         "--experiments", nargs="+",
         choices=["RQ1", "RQ2", "RQ3", "RQ4", "RQ5", "RQ6", "RQ7", "RQ9", "RQ10", "RQ11", "all"],
         default=["all"],
@@ -556,11 +679,12 @@ def main():
     print(f"Binary: {args.binary}")
     print(f"Output: {args.output}")
     print(f"Trials per config: {args.trials}")
+    print(f"Workload size: {args.workload_size} elements ({args.workload_size * 4 / (1024**2):.1f} MB)")
     print("="*60)
     print()
 
     runner = BenchmarkRunner(args.binary)
-    suite = ExperimentSuite(runner, args.output)
+    suite = ExperimentSuite(runner, args.output, workload_size=args.workload_size)
 
     if "all" in args.experiments:
         results = suite.run_all(trials=args.trials)

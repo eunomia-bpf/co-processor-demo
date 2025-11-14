@@ -85,10 +85,12 @@ struct BenchmarkConfig {
     KernelType kernel_type;
     bool enable_priorities;
     std::vector<int> kernels_per_stream_custom; // For load imbalance experiments
+    std::vector<KernelType> kernel_types_per_stream; // For heterogeneous workloads
+    bool use_heterogeneous; // Enable different kernel types per stream
 
     BenchmarkConfig() : num_streams(4), num_kernels_per_stream(10),
                         workload_size(1048576), kernel_type(MIXED),
-                        enable_priorities(false) {}
+                        enable_priorities(false), use_heterogeneous(false) {}
 };
 
 // Timing information per kernel
@@ -96,6 +98,7 @@ struct KernelTiming {
     int stream_id;
     int kernel_id;
     int priority;
+    KernelType kernel_type;
     float enqueue_time_ms;
     float start_time_ms;
     float end_time_ms;
@@ -304,6 +307,7 @@ void print_usage(const char *prog_name) {
     printf("  -t, --type TYPE         Kernel type: compute|memory|mixed|gemm (default: mixed)\n");
     printf("  -p, --priority          Enable stream priorities\n");
     printf("  -l, --load-imbalance SPEC  Custom kernels per stream (e.g., \"5,10,20,40\")\n");
+    printf("  -H, --heterogeneous SPEC   Heterogeneous kernel types (e.g., \"memory,memory,compute,compute\")\n");
     printf("  -h, --help              Show this help message\n");
 }
 
@@ -318,12 +322,13 @@ int main(int argc, char **argv) {
         {"type", required_argument, 0, 't'},
         {"priority", no_argument, 0, 'p'},
         {"load-imbalance", required_argument, 0, 'l'},
+        {"heterogeneous", required_argument, 0, 'H'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "s:k:w:t:pl:h", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:k:w:t:pl:H:h", long_options, NULL)) != -1) {
         switch (opt) {
             case 's':
                 config.num_streams = atoi(optarg);
@@ -358,6 +363,30 @@ int main(int argc, char **argv) {
                     // Override num_streams if custom specified
                     if (!config.kernels_per_stream_custom.empty()) {
                         config.num_streams = config.kernels_per_stream_custom.size();
+                    }
+                }
+                break;
+            case 'H':
+                {
+                    // Parse comma-separated list of kernel types per stream
+                    config.use_heterogeneous = true;
+                    char *token = strtok(optarg, ",");
+                    while (token != NULL) {
+                        KernelType ktype;
+                        if (strcmp(token, "compute") == 0) ktype = COMPUTE;
+                        else if (strcmp(token, "memory") == 0) ktype = MEMORY;
+                        else if (strcmp(token, "mixed") == 0) ktype = MIXED;
+                        else if (strcmp(token, "gemm") == 0) ktype = GEMM;
+                        else {
+                            fprintf(stderr, "Invalid kernel type in heterogeneous spec: %s\n", token);
+                            return 1;
+                        }
+                        config.kernel_types_per_stream.push_back(ktype);
+                        token = strtok(NULL, ",");
+                    }
+                    // Override num_streams
+                    if (!config.kernel_types_per_stream.empty()) {
+                        config.num_streams = config.kernel_types_per_stream.size();
                     }
                 }
                 break;
@@ -495,7 +524,13 @@ int main(int argc, char **argv) {
 
             CUDA_CHECK(cudaEventRecord(*start_events[event_idx], *streams[s]));
 
-            launch_kernel(config.kernel_type, d_data[s].get(), d_temp[s].get(),
+            // Determine kernel type for this stream
+            KernelType current_kernel_type = config.kernel_type;
+            if (config.use_heterogeneous && s < (int)config.kernel_types_per_stream.size()) {
+                current_kernel_type = config.kernel_types_per_stream[s];
+            }
+
+            launch_kernel(current_kernel_type, d_data[s].get(), d_temp[s].get(),
                          config.workload_size, grid, block, *streams[s], d_matrix_c[s].get());
 
             CUDA_CHECK(cudaEventRecord(*end_events[event_idx], *streams[s]));
@@ -504,6 +539,7 @@ int main(int argc, char **argv) {
             timing.stream_id = s;
             timing.kernel_id = k;
             timing.priority = stream_priorities[s];
+            timing.kernel_type = current_kernel_type;
 
             // Store enqueue event for later
             CUDA_CHECK(cudaEventSynchronize(*enqueue_event));
