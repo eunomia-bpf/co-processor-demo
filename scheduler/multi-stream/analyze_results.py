@@ -12,6 +12,7 @@ import seaborn as sns
 from pathlib import Path
 import json
 import argparse
+import os
 from typing import Dict, List, Tuple
 import warnings
 warnings.filterwarnings('ignore')
@@ -396,54 +397,256 @@ class ResultAnalyzer:
             }
 
     def analyze_rq3_priority_effectiveness(self) -> Dict:
-        """Analyze RQ3: Priority Effectiveness."""
-        print("\n=== RQ3: Priority Effectiveness Analysis ===")
+        """Analyze RQ3: CUDA Priority Mechanism Analysis (4 sub-questions)."""
+        print("\n=== RQ3: CUDA Priority Mechanism Analysis ===")
 
         df = self.load_data("rq3_priority_effectiveness.csv")
 
-        # Compare priority vs non-priority
-        comparison = df.groupby('streams').apply(
-            lambda x: pd.Series({
-                'no_priority_inversions': x[x['inversions'] == '0']['inversions'].mean(),
-                'priority_inversions': x[x['inversions'] != '0']['inversions'].mean() if any(x['inversions'] != '0') else 0,
-                'no_priority_fairness': x[x['inversions'] == '0']['jains_index'].mean(),
-                'priority_fairness': x[x['inversions'] != '0']['jains_index'].mean() if any(x['inversions'] != '0') else 0
-            })
-        )
+        # Check if we have priority_enabled column
+        if 'priority_enabled' not in df.columns:
+            print("\nWarning: priority_enabled column not found, using inversions as proxy")
+            df['priority_enabled'] = df['inversions'] > 0
 
-        print("\nPriority Impact:")
-        print(comparison)
+        # Separate priority and non-priority runs
+        no_pri_df = df[df['priority_enabled'] == 0]
+        with_pri_df = df[df['priority_enabled'] == 1]
 
-        # Visualization
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        print("\n--- Performance Comparison (Priority vs No Priority) ---")
 
-        # Fairness comparison
-        priority_data = []
-        for _, row in df.iterrows():
-            has_priority = row.get('inversions', '0') != '0'  # Heuristic
-            priority_data.append({
-                'streams': row['streams'],
-                'priority': 'With Priority' if has_priority else 'No Priority',
-                'jains_index': float(row['jains_index'])
-            })
+        # Compare metrics across stream counts
+        for streams in sorted(df['streams'].unique()):
+            no_pri = no_pri_df[no_pri_df['streams'] == streams]
+            with_pri = with_pri_df[with_pri_df['streams'] == streams]
 
-        priority_df = pd.DataFrame(priority_data)
-        sns.boxplot(data=priority_df, x='streams', y='jains_index', hue='priority', ax=axes[0])
-        axes[0].set_title("Jain's Fairness Index: Priority vs No Priority")
-        axes[0].set_ylabel("Jain's Fairness Index")
+            if not no_pri.empty and not with_pri.empty:
+                no_pri_tput = no_pri['throughput'].mean()
+                with_pri_tput = with_pri['throughput'].mean()
+                no_pri_lat = no_pri['mean_lat'].mean()
+                with_pri_lat = with_pri['mean_lat'].mean()
+                no_pri_max_conc = no_pri['max_concurrent'].mean()
+                with_pri_max_conc = with_pri['max_concurrent'].mean()
+                no_pri_inv = no_pri['inversions'].mean()
+                with_pri_inv = with_pri['inversions'].mean()
 
-        # Inversion count (when priority enabled)
-        priority_only = df[df['inversions'] != '0'] if 'inversions' in df.columns else df
-        if not priority_only.empty:
-            sns.barplot(data=priority_only, x='streams', y='inversions', ax=axes[1])
-            axes[1].set_title('Priority Inversions by Stream Count')
-            axes[1].set_ylabel('Inversion Count')
+                tput_diff = ((with_pri_tput - no_pri_tput) / no_pri_tput) * 100
+                lat_diff = ((with_pri_lat - no_pri_lat) / no_pri_lat) * 100
+
+                print(f"\n{streams} streams:")
+                print(f"  Throughput: {no_pri_tput:.2f} → {with_pri_tput:.2f} kernels/sec ({tput_diff:+.2f}%)")
+                print(f"  Latency: {no_pri_lat:.2f} → {with_pri_lat:.2f} ms ({lat_diff:+.2f}%)")
+                print(f"  Max Concurrent: {no_pri_max_conc:.2f} → {with_pri_max_conc:.2f}")
+                print(f"  Priority Inversions: {no_pri_inv:.0f} → {with_pri_inv:.0f}")
+
+        # Overall statistics
+        print("\n--- Overall Statistics ---")
+        if not no_pri_df.empty and not with_pri_df.empty:
+            avg_tput_diff = ((with_pri_df['throughput'].mean() - no_pri_df['throughput'].mean())
+                            / no_pri_df['throughput'].mean()) * 100
+            avg_lat_diff = ((with_pri_df['mean_lat'].mean() - no_pri_df['mean_lat'].mean())
+                           / no_pri_df['mean_lat'].mean()) * 100
+
+            print(f"Average throughput difference: {avg_tput_diff:+.2f}%")
+            print(f"Average latency difference: {avg_lat_diff:+.2f}%")
+            print(f"Average inversions (no priority): {no_pri_df['inversions'].mean():.1f}")
+            print(f"Average inversions (with priority): {with_pri_df['inversions'].mean():.1f}")
+
+        # Try to load RQ10 data for RQ3.3 (preemption test)
+        try:
+            df_preempt = self.load_data("rq10_preemption_latency.csv")
+            has_preempt_data = True
+        except FileNotFoundError:
+            print("\n⚠ RQ10 data not found, RQ3.3 (preemption test) will be skipped")
+            has_preempt_data = False
+
+        # Visualization - 2×2 grid (4 subplots)
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+        stream_counts = sorted(df['streams'].unique())
+        x = np.arange(len(stream_counts))
+        width = 0.35
+
+        # RQ3.1: Queue ordering (inversions)
+        no_pri_invs = [no_pri_df[no_pri_df['streams'] == s]['inversions'].mean() for s in stream_counts]
+        with_pri_invs = [with_pri_df[with_pri_df['streams'] == s]['inversions'].mean() for s in stream_counts]
+
+        axes[0, 0].bar(x - width/2, no_pri_invs, width, label='No Priority', alpha=0.7, color='blue', edgecolor='black', linewidth=1.5)
+        axes[0, 0].bar(x + width/2, with_pri_invs, width, label='With Priority', alpha=0.7, color='orange', edgecolor='black', linewidth=1.5)
+        axes[0, 0].set_xlabel('Stream Count', fontsize=10)
+        axes[0, 0].set_ylabel('Priority Inversions Detected', fontsize=10)
+        axes[0, 0].set_title('RQ3.1: Does priority affect queue ordering?', fontsize=11, fontweight='bold')
+        axes[0, 0].set_xticks(x)
+        axes[0, 0].set_xticklabels(stream_counts, fontsize=10)
+        axes[0, 0].legend(fontsize=9)
+        axes[0, 0].grid(True, alpha=0.3, axis='y')
+        axes[0, 0].set_ylim(bottom=0)  # Start Y-axis from 0 to show zero bars clearly
+
+        # Add value labels on bars
+        for i, (no_pri, with_pri) in enumerate(zip(no_pri_invs, with_pri_invs)):
+            axes[0, 0].text(i - width/2, no_pri + 0.5, f'{no_pri:.0f}',
+                       ha='center', va='bottom', fontsize=9, fontweight='bold')
+            axes[0, 0].text(i + width/2, with_pri + 0.5, f'{with_pri:.0f}',
+                       ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+        # RQ3.2: Performance impact (throughput)
+        no_pri_tputs = [no_pri_df[no_pri_df['streams'] == s]['throughput'].mean() for s in stream_counts]
+        with_pri_tputs = [with_pri_df[with_pri_df['streams'] == s]['throughput'].mean() for s in stream_counts]
+
+        axes[0, 1].bar(x - width/2, no_pri_tputs, width, label='No Priority', alpha=0.7, color='blue')
+        axes[0, 1].bar(x + width/2, with_pri_tputs, width, label='With Priority', alpha=0.7, color='orange')
+        axes[0, 1].set_xlabel('Stream Count', fontsize=10)
+        axes[0, 1].set_ylabel('Throughput (kernels/sec)', fontsize=10)
+        axes[0, 1].set_title('RQ3.2: Does priority affect execution performance?', fontsize=11, fontweight='bold')
+        axes[0, 1].set_xticks(x)
+        axes[0, 1].set_xticklabels(stream_counts, fontsize=10)
+        axes[0, 1].legend(fontsize=9)
+        axes[0, 1].grid(True, alpha=0.3, axis='y')
+
+        # Add percentage difference annotations
+        for i, (no_pri, with_pri) in enumerate(zip(no_pri_tputs, with_pri_tputs)):
+            if not pd.isna(no_pri) and not pd.isna(with_pri) and no_pri > 0:
+                diff_pct = ((with_pri - no_pri) / no_pri) * 100
+                axes[0, 1].text(i, max(no_pri, with_pri) * 1.02, f'{diff_pct:+.1f}%',
+                           ha='center', fontsize=9, fontweight='bold',
+                           color='red' if abs(diff_pct) > 1 else 'green')
+
+        # RQ3.3: Preemption capability (from RQ10 data)
+        if has_preempt_data:
+            baseline = df_preempt[df_preempt['scenario'] == 'baseline_no_contention']
+            baseline_p99 = baseline['p99'].astype(float).mean() if not baseline.empty else 0
+
+            blocking_types = ['compute', 'gemm']
+            preempt_data = []
+
+            for blocking_type in blocking_types:
+                no_pri = df_preempt[df_preempt['scenario'] == f'contention_{blocking_type}_no_priority']
+                with_pri = df_preempt[df_preempt['scenario'] == f'contention_{blocking_type}_with_priority']
+
+                if not no_pri.empty and not with_pri.empty:
+                    no_pri_p99 = no_pri['p99'].astype(float).mean()
+                    with_pri_p99 = with_pri['p99'].astype(float).mean()
+                    benefit = no_pri_p99 / with_pri_p99 if with_pri_p99 > 0 else 1.0
+
+                    preempt_data.append({
+                        'type': blocking_type.upper(),
+                        'baseline': baseline_p99,
+                        'no_pri': no_pri_p99,
+                        'with_pri': with_pri_p99,
+                        'benefit': benefit
+                    })
+
+            if preempt_data:
+                x_preempt = np.arange(len(preempt_data))
+                width_preempt = 0.25
+
+                baseline_vals = [d['baseline'] for d in preempt_data]
+                no_pri_vals = [d['no_pri'] for d in preempt_data]
+                with_pri_vals = [d['with_pri'] for d in preempt_data]
+
+                axes[1, 0].bar(x_preempt - width_preempt, baseline_vals, width_preempt,
+                           label='Baseline (no contention)', alpha=0.7, color='green')
+                axes[1, 0].bar(x_preempt, no_pri_vals, width_preempt,
+                           label='Contention (no priority)', alpha=0.7, color='red')
+                axes[1, 0].bar(x_preempt + width_preempt, with_pri_vals, width_preempt,
+                           label='Contention (with priority)', alpha=0.7, color='orange')
+
+                axes[1, 0].set_ylabel('Fast Kernel P99 Latency (ms)', fontsize=10)
+                axes[1, 0].set_xlabel('Blocking Kernel Type', fontsize=10)
+                axes[1, 0].set_title('RQ3.3: Can priority preempt running kernels?', fontsize=11, fontweight='bold')
+                axes[1, 0].set_xticks(x_preempt)
+                axes[1, 0].set_xticklabels([d['type'] for d in preempt_data], fontsize=10)
+                axes[1, 0].legend(fontsize=9, loc='upper left')
+                axes[1, 0].grid(True, alpha=0.3, axis='y')
+                axes[1, 0].set_yscale('log')
+
+                # Add benefit annotations
+                for i, d in enumerate(preempt_data):
+                    axes[1, 0].text(i, max(d['no_pri'], d['with_pri']) * 1.2,
+                               f'Benefit: {d["benefit"]:.2f}×',
+                               ha='center', fontsize=8,
+                               color='red' if d['benefit'] < 1.1 else 'green')
+        else:
+            axes[1, 0].text(0.5, 0.5, 'RQ3.3: Preemption test data not available\n(Run RQ10 experiment)',
+                       ha='center', va='center', transform=axes[1, 0].transAxes, fontsize=10)
+            axes[1, 0].set_title('RQ3.3: Can priority preempt running kernels?', fontsize=11, fontweight='bold')
+
+        # RQ3.4: Per-priority-class latency
+        # Load detailed per-kernel data from CSV files
+        detailed_files = [f for f in os.listdir(self.results_dir) if f.startswith('detailed_kernels_') and f.endswith('.csv')]
+
+        if detailed_files:
+            priority_latencies = {'high': [], 'low': []}
+
+            for detail_file in detailed_files:
+                try:
+                    detail_df = pd.read_csv(os.path.join(self.results_dir, detail_file))
+                    # High priority: -5, -4; Low priority: -2, 0
+                    high_pri = detail_df[detail_df['priority'].isin([-5, -4])]['duration_ms']
+                    low_pri = detail_df[detail_df['priority'].isin([-2, 0])]['duration_ms']
+
+                    if not high_pri.empty:
+                        priority_latencies['high'].extend(high_pri.tolist())
+                    if not low_pri.empty:
+                        priority_latencies['low'].extend(low_pri.tolist())
+                except Exception as e:
+                    print(f"Warning: Failed to load {detail_file}: {e}")
+
+            if priority_latencies['high'] and priority_latencies['low']:
+                # Calculate average latencies
+                avg_high = np.mean(priority_latencies['high'])
+                avg_low = np.mean(priority_latencies['low'])
+                std_high = np.std(priority_latencies['high'])
+                std_low = np.std(priority_latencies['low'])
+
+                # Bar chart
+                x_pri = np.arange(2)
+                width = 0.6
+
+                bars = axes[1, 1].bar(x_pri, [avg_high, avg_low], width,
+                                     color=['#ff7f0e', '#1f77b4'],
+                                     alpha=0.7, edgecolor='black', linewidth=1.5,
+                                     yerr=[std_high, std_low], capsize=5)
+
+                axes[1, 1].set_ylabel('Average Kernel Duration (ms)', fontsize=10)
+                axes[1, 1].set_xlabel('Priority Class', fontsize=10)
+                axes[1, 1].set_title('RQ3.4: Do high-priority kernels achieve lower latency?', fontsize=11, fontweight='bold')
+                axes[1, 1].set_xticks(x_pri)
+                axes[1, 1].set_xticklabels(['High Priority\n(-5, -4)', 'Low Priority\n(-2, 0)'], fontsize=10)
+                axes[1, 1].grid(True, alpha=0.3, axis='y')
+                axes[1, 1].set_ylim(bottom=0)
+
+                # Add value labels
+                axes[1, 1].text(0, avg_high + std_high + 0.05, f'{avg_high:.2f}ms',
+                           ha='center', va='bottom', fontsize=9, fontweight='bold')
+                axes[1, 1].text(1, avg_low + std_low + 0.05, f'{avg_low:.2f}ms',
+                           ha='center', va='bottom', fontsize=9, fontweight='bold')
+
+                # Add ratio annotation
+                ratio = avg_high / avg_low if avg_low > 0 else 1.0
+                axes[1, 1].text(0.5, max(avg_high, avg_low) + max(std_high, std_low) + 0.15,
+                           f'Ratio: {ratio:.2f}×',
+                           ha='center', fontsize=9,
+                           bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.3))
+            else:
+                axes[1, 1].text(0.5, 0.5, 'RQ3.4: Insufficient data',
+                           ha='center', va='center', transform=axes[1, 1].transAxes, fontsize=10)
+                axes[1, 1].set_title('RQ3.4: Do high-priority kernels achieve lower latency?', fontsize=11, fontweight='bold')
+        else:
+            axes[1, 1].text(0.5, 0.5, 'RQ3.4: No detailed data files found',
+                       ha='center', va='center', transform=axes[1, 1].transAxes, fontsize=10)
+            axes[1, 1].set_title('RQ3.4: Do high-priority kernels achieve lower latency?', fontsize=11, fontweight='bold')
+            axes[1, 1].set_xlabel('Priority Class', fontsize=10)
+            axes[1, 1].set_ylabel('Average Latency (ms)', fontsize=10)
 
         plt.tight_layout()
         plt.savefig(self.figures_dir / "rq3_priority_effectiveness.png", dpi=300)
         plt.close()
 
-        return {"priority_reduces_inversions": True}
+        return {
+            "avg_throughput_diff_pct": avg_tput_diff if not no_pri_df.empty and not with_pri_df.empty else 0,
+            "avg_latency_diff_pct": avg_lat_diff if not no_pri_df.empty and not with_pri_df.empty else 0,
+            "priority_affects_queue_only": True,
+            "has_preempt_data": has_preempt_data
+        }
 
     def analyze_rq4_memory_pressure(self) -> Dict:
         """Analyze RQ4: Memory Pressure."""
@@ -864,7 +1067,9 @@ class ResultAnalyzer:
             'has_heterogeneous_data': not hetero_df.empty
         }
 
-    def analyze_rq10_preemption_latency(self) -> Dict:
+    # RQ10 has been merged into RQ3.3
+    # Keeping this function for reference, but it's no longer called
+    def analyze_rq10_preemption_latency_DEPRECATED(self) -> Dict:
         """Analyze RQ10: Preemption latency estimation via contention analysis."""
         print("\n=== RQ10: Preemption Latency Analysis ===")
         print("Method: Measure fast kernel latency inflation under contention")
@@ -1123,7 +1328,7 @@ def main():
     parser = argparse.ArgumentParser(description="Analyze GPU scheduler experiments")
     parser.add_argument("--results", default="results", help="Results directory")
     parser.add_argument("--experiments", nargs="+",
-                       choices=["RQ1", "RQ2", "RQ3", "RQ4", "RQ5", "RQ6", "RQ7", "RQ9", "RQ10", "RQ11", "all"],
+                       choices=["RQ1", "RQ2", "RQ3", "RQ4", "RQ5", "RQ6", "RQ7", "RQ9", "RQ11", "all"],
                        default=["all"], help="Which experiments to analyze")
 
     args = parser.parse_args()
@@ -1144,7 +1349,6 @@ def main():
         "RQ6": analyzer.analyze_rq6_load_imbalance,
         "RQ7": analyzer.analyze_rq7_tail_latency,
         "RQ9": analyzer.analyze_rq9_priority_tail_latency,
-        "RQ10": analyzer.analyze_rq10_preemption_latency,
         "RQ11": analyzer.analyze_rq11_bandwidth_partitioning,
     }
 

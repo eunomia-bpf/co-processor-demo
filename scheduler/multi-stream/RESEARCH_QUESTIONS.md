@@ -10,30 +10,18 @@ Systematic exploration of CUDA scheduler behavior using micro-benchmarks to unde
 
 **Hypothesis**: Concurrent execution rate should increase with more streams until hitting hardware limits (e.g., SM count, memory bandwidth). Smaller kernel workloads should enable true concurrent execution (max_concurrent > 1), while larger kernels saturate GPU resources and execute serially (max_concurrent = 1).
 
-**Motivation**: Understanding the relationship between kernel size and concurrency is critical for scheduler design. If kernels are too large, they monopolize all GPU resources, preventing concurrent execution even with multiple streams. This experiment explores the kernel size threshold where concurrent execution becomes possible.
-
 **Experiments**:
 - **Vary streams**: 1, 2, 4, 8, 16, 32, 64
-- **Vary workload sizes**:
-  - 64 KB (16K elements) - very small, should show high concurrency
-  - 256 KB (64K elements) - small, good concurrency potential
-  - 1 MB (256K elements) - medium, some concurrency
-  - 4 MB (1M elements) - large, limited concurrency
-  - 16 MB (4M elements) - very large, likely serial execution
-- **Fixed**: 20 kernels/stream, mixed workload
-- **Metrics**: Concurrent execution rate, max concurrent kernels, throughput, grid/block dimensions
+- **Vary workload sizes**: 64KB, 256KB, 1MB, 4MB, 16MB (GEMM kernels)
+- **Fixed**: 20 kernels/stream
 
-**Expected Insights**:
-1. **Kernel Size Threshold**: Identify workload size where `max_concurrent` transitions from 1 (serial) to >1 (concurrent)
-2. **Optimal Configuration**: Find best combination of stream count and kernel size for throughput
-3. **Resource Saturation**: Understand how grid size (number of blocks) affects SM saturation
-4. **Concurrency vs Throughput Trade-off**: Smaller kernels enable concurrency but may reduce throughput due to launch overhead
+**Visualizations** (2×2 grid):
+- **RQ1.1**: How does concurrent execution rate vary with stream count and workload size? Multi-line plot - X: stream count (log), Y: concurrent_rate (%), lines: workload sizes
+- **RQ1.2**: How does throughput scale with stream count and workload size? Multi-line plot - X: stream count (log), Y: throughput (kernels/sec), lines: workload sizes
+- **RQ1.3**: How many kernels actually run concurrently? Multi-line plot - X: stream count (log), Y: max_concurrent, lines: workload sizes
+- **RQ1.4**: How does GPU utilization change with stream count and workload size? Multi-line plot - X: stream count (log), Y: GPU utilization (%), lines: workload sizes
 
-**Key Metrics to Watch**:
-- `max_concurrent`: Directly shows if kernels run simultaneously (>1) or serially (=1)
-- `concurrent_rate`: Percentage of ideal parallelism achieved
-- `grid_size` and `block_size`: Recorded to correlate with concurrency behavior
-- `throughput`: Overall system performance
+**Setup**: GEMM workload with varying grid sizes (recorded in legend)
 
 ---
 
@@ -43,25 +31,38 @@ Systematic exploration of CUDA scheduler behavior using micro-benchmarks to unde
 **Hypothesis**: Compute-bound kernels should show better concurrency than memory-bound ones due to less contention for memory bandwidth.
 
 **Experiments**:
-- Kernel types: compute, memory, mixed, gemm
-- Fixed: 8 streams, 20 kernels/stream
-- Metrics: Concurrent execution rate, throughput, avg latency
+- **Kernel types**: compute, memory, mixed, gemm
+- **Vary streams**: 1, 2, 4, 8, 16, 32, 64
+- **Fixed**: 20 kernels/stream
 
-**Expected Insight**: Understand which workloads benefit most from multi-stream scheduling.
+**Visualizations** (2×2 grid):
+- **RQ2.1**: Which kernel types achieve better concurrent execution? Multi-line plot - X: stream count (log), Y: concurrent_rate (%), lines: kernel types
+- **RQ2.2**: Which kernel types achieve higher throughput? Multi-line plot - X: stream count (log), Y: throughput (kernels/sec), lines: kernel types
+- **RQ2.3**: Which kernel types enable more concurrent execution? Multi-line plot - X: stream count (log), Y: max_concurrent, lines: kernel types
+- **RQ2.4**: How does kernel type affect latency? Multi-line plot - X: stream count (log), Y: mean_latency (ms), lines: kernel types
+
+**Setup**: Each kernel type tested across stream counts to characterize concurrency behavior
 
 ---
 
-### RQ3: Priority Scheduling Effectiveness
-**Question**: Does CUDA priority scheduling reduce priority inversions and improve fairness?
+### RQ3: CUDA Priority Mechanism Analysis
+**Question**: Does CUDA stream priority provide effective priority control for GPU scheduling?
 
-**Hypothesis**: Priority-enabled streams should show fewer inversions and potentially better high-priority stream performance.
+**Hypothesis**: Priority-enabled streams should improve high-priority task performance through queue ordering and/or execution preemption.
 
 **Experiments**:
-- Compare: with/without priorities
-- Vary: 4, 8, 16 streams
-- Metrics: Priority inversions, Jain's fairness index, per-stream latency
+- **RQ3.1**: Queue ordering test - 4,8,16 streams with priorities (0,1,2), measure inversions
+- **RQ3.2**: Performance impact test - compare throughput/latency with/without priorities
+- **RQ3.3**: Preemption capability test - fast kernel (memory, 0.02ms) vs slow kernel (compute, 1.6ms), measure priority benefit
+- **RQ3.4**: Per-priority-class latency - compare high-priority vs low-priority kernel latency when priority enabled
 
-**Expected Insight**: Quantify effectiveness of CUDA priority mechanism.
+**Visualizations** (2×2 grid):
+- **RQ3.1**: Does priority affect queue ordering? Bar chart showing priority inversions (with/without priority) across stream counts
+- **RQ3.2**: Does priority affect execution performance? Bar chart comparing throughput and latency (with/without priority) across stream counts
+- **RQ3.3**: Can priority preempt running kernels? Bar chart showing fast kernel P99 latency under contention (baseline, no priority, with priority)
+- **RQ3.4**: Do high-priority kernels achieve lower latency? Bar chart comparing average latency by priority class (high-priority vs low-priority streams)
+
+**Setup**: Mixed workload for RQ3.1-3.2 and RQ3.4; heterogeneous workload (memory vs compute) for RQ3.3
 
 ---
 
@@ -161,55 +162,6 @@ Systematic exploration of CUDA scheduler behavior using micro-benchmarks to unde
 
 ---
 
-### RQ10: Scheduler Preemption Latency
-**Question**: How quickly can the CUDA scheduler preempt a running stream to service a higher-priority request?
-
-**Motivation**: XSched achieves 10-50µs preemption latency with Lv3 (hardware-assisted). What is CUDA's baseline?
-
-**Hypothesis**: CUDA's time-slicing introduces ms-level preemption latency, proportional to kernel execution time.
-
-**Experiments**:
-- **Setup**:
-  1. Launch long-running kernel on low-priority stream A
-  2. After T ms, inject high-priority kernel on stream B
-  3. Measure: Δt = time from `cudaLaunchKernel(B)` to B's actual execution start
-- **Variables**:
-  - Command duration (A's kernel): 1ms, 10ms, 100ms, 1000ms
-  - Priority modes: No priority (FCFS) vs High priority (B)
-  - Kernel types: compute, memory, mixed
-- **Metrics**:
-  - **P50, P95, P99 preemption latency**
-  - **Preemption latency vs command duration** (should be linear for FCFS, sub-linear for priority)
-  - **Comparison**: CUDA baseline vs XSched Lv1/Lv2/Lv3 (from paper)
-
-**Measurement Method**:
-```cpp
-// On stream A (low priority)
-cudaEventRecord(A_start, streamA);
-long_kernel<<<grid, block, 0, streamA>>>(data, 100ms);
-cudaEventRecord(A_end, streamA);
-
-// After 10ms, on stream B (high priority)
-cudaEventRecord(B_enqueue, 0);  // Host-side timestamp
-cudaEventRecord(B_start, streamB);
-short_kernel<<<grid, block, 0, streamB>>>(data, 1ms);
-
-// Calculate preemption latency
-preemption_latency = B_start_time - B_enqueue_time;
-```
-
-**Expected Results**:
-- **CUDA FCFS**: Preemption ≈ remaining time of A's kernel (0-100ms, linear)
-- **CUDA Priority**: Preemption ~1-10ms (better but still coarse-grained)
-- **XSched Lv3**: 10-50µs (from paper, hardware-assisted)
-
-**Limitation**: CUDA lacks fine-grained preemption (no Lv2/Lv3 equivalent). This RQ quantifies the gap.
-
-**XSched Comparison**: Maps to XSched §7.3 + Figure 11(a)(b) - "Preemption Latency vs Command Duration"
-
-**Implementation**: Measured via contention analysis (fast memory kernel latency with/without blocking compute kernel) rather than direct GPU timestamps.
-
----
 
 ### RQ11: Bandwidth Partitioning and Quota Enforcement
 **Question**: Can we achieve target throughput ratios (bandwidth partitioning) between competing streams?

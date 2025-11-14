@@ -27,8 +27,9 @@ DEFAULT_KERNELS_PER_STREAM = 20
 class BenchmarkRunner:
     """Runs multi-stream benchmark and parses results."""
 
-    def __init__(self, binary_path: str = "./multi_stream_bench"):
+    def __init__(self, binary_path: str = "./multi_stream_bench", output_dir: str = "results"):
         self.binary_path = binary_path
+        self.output_dir = output_dir
         if not os.path.exists(binary_path):
             raise FileNotFoundError(f"Benchmark binary not found: {binary_path}")
 
@@ -73,6 +74,22 @@ class BenchmarkRunner:
                     row['trial'] = trial
                     row['timestamp'] = datetime.now().isoformat()
                     results.append(row)
+
+                    # Parse detailed per-kernel output if available
+                    detail_lines = [line for line in result.stdout.split('\n') if line.startswith('DETAIL_CSV:')]
+                    if detail_lines:
+                        detail_header_line = [line for line in result.stdout.split('\n') if line.startswith('DETAIL_CSV_HEADER:')]
+                        if detail_header_line:
+                            detail_header = detail_header_line[0].replace('DETAIL_CSV_HEADER: ', '').split(',')
+                            detailed_data = []
+                            for detail_line in detail_lines:
+                                detail_row = detail_line.replace('DETAIL_CSV: ', '').split(',')
+                                detailed_data.append(dict(zip(detail_header, detail_row)))
+
+                            # Save detailed data to separate file
+                            detail_filename = f"{self.output_dir}/detailed_kernels_s{streams}_k{kernels}_t{trial}.csv"
+                            detail_df = pd.DataFrame(detailed_data)
+                            detail_df.to_csv(detail_filename, index=False)
                 else:
                     print(f"Warning: No CSV output in trial {trial}")
 
@@ -709,7 +726,7 @@ def main():
     print("="*60)
     print()
 
-    runner = BenchmarkRunner(args.binary)
+    runner = BenchmarkRunner(args.binary, output_dir=args.output)
     suite = ExperimentSuite(runner, args.output, workload_size=args.workload_size)
 
     if "all" in args.experiments:

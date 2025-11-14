@@ -288,8 +288,8 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
 
     // CSV output for easy parsing
     printf("CSV: streams,kernels_per_stream,total_kernels,type,wall_time_ms,throughput,mean_lat,p50,p95,p99,");
-    printf("concurrent_rate,overhead,util,jains_index,max_concurrent,avg_concurrent,inversions,working_set_mb,fits_in_l2,stddev,grid_size,block_size\n");
-    printf("CSV: %d,%d,%d,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.4f,%d,%.2f,%d,%.2f,%d,%.2f,%d,%d\n",
+    printf("concurrent_rate,overhead,util,jains_index,max_concurrent,avg_concurrent,inversions,working_set_mb,fits_in_l2,stddev,grid_size,block_size,priority_enabled\n");
+    printf("CSV: %d,%d,%d,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.4f,%d,%.2f,%d,%.2f,%d,%.2f,%d,%d,%d\n",
            config.num_streams, config.num_kernels_per_stream, total_kernels,
            config.kernel_type == COMPUTE ? "compute" :
            config.kernel_type == MEMORY ? "memory" :
@@ -297,7 +297,19 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
            total_wall_time, throughput, avg_latency, p50, p95, p99,
            concurrent_rate, scheduler_overhead, gpu_utilization,
            jains_index, max_concurrent, avg_concurrent, priority_inversions,
-           working_set_mb, fits_in_l2 ? 1 : 0, stddev, grid_x, block_x);
+           working_set_mb, fits_in_l2 ? 1 : 0, stddev, grid_x, block_x,
+           config.enable_priorities ? 1 : 0);
+
+    // Output detailed per-kernel data if priorities are enabled
+    if (config.enable_priorities) {
+        printf("DETAIL_CSV_HEADER: stream_id,kernel_id,priority,start_ms,end_ms,duration_ms,latency_ms\n");
+        for (const auto& t : timings) {
+            printf("DETAIL_CSV: %d,%d,%d,%.3f,%.3f,%.3f,%.3f\n",
+                   t.stream_id, t.kernel_id, t.priority,
+                   t.start_time_ms, t.end_time_ms,
+                   t.duration_ms, t.launch_latency_ms);
+        }
+    }
 }
 
 void print_usage(const char *prog_name) {
