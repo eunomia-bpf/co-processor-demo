@@ -50,63 +50,173 @@ class ResultAnalyzer:
         return df
 
     def analyze_rq1_stream_scalability(self) -> Dict:
-        """Analyze RQ1: Stream Scalability."""
+        """Analyze RQ1: Stream Scalability with workload size variations."""
         print("\n=== RQ1: Stream Scalability Analysis ===")
 
         df = self.load_data("rq1_stream_scalability.csv")
         df['streams'] = pd.to_numeric(df['streams'])
 
-        # Group by stream count
-        stats = df.groupby('streams').agg({
-            'concurrent_rate': ['mean', 'std'],
-            'throughput': ['mean', 'std'],
-            'max_concurrent': ['mean', 'std'],
-            'util': ['mean', 'std']
-        }).round(2)
+        # Check if we have workload size variations
+        has_workload_variations = 'workload_size_mb' in df.columns or 'workload_elements' in df.columns
 
-        print("\nStream Count vs Metrics:")
-        print(stats)
+        if has_workload_variations:
+            # Ensure workload_size_mb exists
+            if 'workload_size_mb' not in df.columns and 'workload_elements' in df.columns:
+                df['workload_size_mb'] = (pd.to_numeric(df['workload_elements']) * 4) / (1024 * 1024)
 
-        # Find optimal stream count
-        optimal_streams = df.groupby('streams')['throughput'].mean().idxmax()
-        optimal_throughput = df.groupby('streams')['throughput'].mean().max()
+            df['workload_size_mb'] = pd.to_numeric(df['workload_size_mb'])
 
-        print(f"\n✓ Optimal stream count: {optimal_streams} (throughput: {optimal_throughput:.2f} kernels/sec)")
+            # Group by both stream count and workload size
+            print("\nStream Count vs Workload Size Analysis:")
+            for size_mb in sorted(df['workload_size_mb'].unique()):
+                size_df = df[df['workload_size_mb'] == size_mb]
+                stats = size_df.groupby('streams').agg({
+                    'concurrent_rate': 'mean',
+                    'throughput': 'mean',
+                    'max_concurrent': 'mean',
+                }).round(2)
+                print(f"\nWorkload: {size_mb:.2f} MB")
+                print(stats.head())
 
-        # Saturation analysis
-        saturation_point = self._find_saturation_point(
-            df.groupby('streams')['throughput'].mean()
-        )
-        print(f"✓ Saturation point: ~{saturation_point} streams")
+            # Find optimal configuration
+            best_config = df.loc[df['throughput'].idxmax()]
+            print(f"\n✓ Best configuration: {int(best_config['streams'])} streams, "
+                  f"{best_config['workload_size_mb']:.2f} MB workload, "
+                  f"throughput: {best_config['throughput']:.2f} kernels/sec")
 
-        # Visualization
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+            # Visualization with multiple lines per workload
+            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
 
-        # Concurrent execution rate
-        self._plot_with_error(df, 'streams', 'concurrent_rate',
-                             axes[0, 0], 'Stream Count', 'Concurrent Execution Rate (%)')
+            # Plot each workload size as a separate line
+            workload_sizes = sorted(df['workload_size_mb'].unique())
+            colors = plt.cm.viridis(np.linspace(0, 1, len(workload_sizes)))
 
-        # Throughput
-        self._plot_with_error(df, 'streams', 'throughput',
-                             axes[0, 1], 'Stream Count', 'Throughput (kernels/sec)')
+            # Plot 1: Concurrent execution rate
+            for i, size_mb in enumerate(workload_sizes):
+                size_df = df[df['workload_size_mb'] == size_mb]
+                grouped = size_df.groupby('streams').agg({
+                    'concurrent_rate': ['mean', 'std']
+                }).reset_index()
+                axes[0, 0].errorbar(grouped['streams'], grouped['concurrent_rate']['mean'],
+                                   yerr=grouped['concurrent_rate']['std'],
+                                   fmt='o-', linewidth=2, markersize=6,
+                                   label=f'{size_mb:.2f} MB', color=colors[i],
+                                   capsize=4, alpha=0.8)
+            axes[0, 0].set_xlabel('Stream Count')
+            axes[0, 0].set_ylabel('Concurrent Execution Rate (%)')
+            axes[0, 0].set_title('Concurrent Execution Rate vs Stream Count')
+            axes[0, 0].legend(title='Workload Size', fontsize=8)
+            axes[0, 0].grid(True, alpha=0.3)
+            axes[0, 0].set_xscale('log', base=2)
 
-        # Max concurrent kernels
-        self._plot_with_error(df, 'streams', 'max_concurrent',
-                             axes[1, 0], 'Stream Count', 'Max Concurrent Kernels')
+            # Plot 2: Throughput
+            for i, size_mb in enumerate(workload_sizes):
+                size_df = df[df['workload_size_mb'] == size_mb]
+                grouped = size_df.groupby('streams').agg({
+                    'throughput': ['mean', 'std']
+                }).reset_index()
+                axes[0, 1].errorbar(grouped['streams'], grouped['throughput']['mean'],
+                                   yerr=grouped['throughput']['std'],
+                                   fmt='s-', linewidth=2, markersize=6,
+                                   label=f'{size_mb:.2f} MB', color=colors[i],
+                                   capsize=4, alpha=0.8)
+            axes[0, 1].set_xlabel('Stream Count')
+            axes[0, 1].set_ylabel('Throughput (kernels/sec)')
+            axes[0, 1].set_title('Throughput vs Stream Count')
+            axes[0, 1].legend(title='Workload Size', fontsize=8)
+            axes[0, 1].grid(True, alpha=0.3)
+            axes[0, 1].set_xscale('log', base=2)
 
-        # GPU utilization
-        self._plot_with_error(df, 'streams', 'util',
-                             axes[1, 1], 'Stream Count', 'GPU Utilization (%)')
+            # Plot 3: Max concurrent kernels
+            for i, size_mb in enumerate(workload_sizes):
+                size_df = df[df['workload_size_mb'] == size_mb]
+                grouped = size_df.groupby('streams').agg({
+                    'max_concurrent': ['mean', 'std']
+                }).reset_index()
+                axes[1, 0].errorbar(grouped['streams'], grouped['max_concurrent']['mean'],
+                                   yerr=grouped['max_concurrent']['std'],
+                                   fmt='^-', linewidth=2, markersize=6,
+                                   label=f'{size_mb:.2f} MB', color=colors[i],
+                                   capsize=4, alpha=0.8)
+            axes[1, 0].set_xlabel('Stream Count')
+            axes[1, 0].set_ylabel('Max Concurrent Kernels')
+            axes[1, 0].set_title('Max Concurrent Kernels vs Stream Count')
+            axes[1, 0].legend(title='Workload Size', fontsize=8)
+            axes[1, 0].grid(True, alpha=0.3)
+            axes[1, 0].set_xscale('log', base=2)
 
-        plt.tight_layout()
-        plt.savefig(self.figures_dir / "rq1_stream_scalability.png", dpi=300)
-        plt.close()
+            # Plot 4: GPU utilization
+            for i, size_mb in enumerate(workload_sizes):
+                size_df = df[df['workload_size_mb'] == size_mb]
+                grouped = size_df.groupby('streams').agg({
+                    'util': ['mean', 'std']
+                }).reset_index()
+                axes[1, 1].errorbar(grouped['streams'], grouped['util']['mean'],
+                                   yerr=grouped['util']['std'],
+                                   fmt='d-', linewidth=2, markersize=6,
+                                   label=f'{size_mb:.2f} MB', color=colors[i],
+                                   capsize=4, alpha=0.8)
+            axes[1, 1].set_xlabel('Stream Count')
+            axes[1, 1].set_ylabel('GPU Utilization (%)')
+            axes[1, 1].set_title('GPU Utilization vs Stream Count')
+            axes[1, 1].legend(title='Workload Size', fontsize=8)
+            axes[1, 1].grid(True, alpha=0.3)
+            axes[1, 1].set_xscale('log', base=2)
 
-        return {
-            "optimal_streams": int(optimal_streams),
-            "optimal_throughput": float(optimal_throughput),
-            "saturation_point": int(saturation_point)
-        }
+            plt.tight_layout()
+            plt.savefig(self.figures_dir / "rq1_stream_scalability.png", dpi=300)
+            plt.close()
+
+            return {
+                "best_streams": int(best_config['streams']),
+                "best_workload_mb": float(best_config['workload_size_mb']),
+                "best_throughput": float(best_config['throughput']),
+                "workload_variations": len(workload_sizes)
+            }
+
+        else:
+            # Legacy code for single workload size
+            stats = df.groupby('streams').agg({
+                'concurrent_rate': ['mean', 'std'],
+                'throughput': ['mean', 'std'],
+                'max_concurrent': ['mean', 'std'],
+                'util': ['mean', 'std']
+            }).round(2)
+
+            print("\nStream Count vs Metrics:")
+            print(stats)
+
+            optimal_streams = df.groupby('streams')['throughput'].mean().idxmax()
+            optimal_throughput = df.groupby('streams')['throughput'].mean().max()
+
+            print(f"\n✓ Optimal stream count: {optimal_streams} (throughput: {optimal_throughput:.2f} kernels/sec)")
+
+            saturation_point = self._find_saturation_point(
+                df.groupby('streams')['throughput'].mean()
+            )
+            print(f"✓ Saturation point: ~{saturation_point} streams")
+
+            # Original single-line visualization
+            fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+            self._plot_with_error(df, 'streams', 'concurrent_rate',
+                                 axes[0, 0], 'Stream Count', 'Concurrent Execution Rate (%)')
+            self._plot_with_error(df, 'streams', 'throughput',
+                                 axes[0, 1], 'Stream Count', 'Throughput (kernels/sec)')
+            self._plot_with_error(df, 'streams', 'max_concurrent',
+                                 axes[1, 0], 'Stream Count', 'Max Concurrent Kernels')
+            self._plot_with_error(df, 'streams', 'util',
+                                 axes[1, 1], 'Stream Count', 'GPU Utilization (%)')
+
+            plt.tight_layout()
+            plt.savefig(self.figures_dir / "rq1_stream_scalability.png", dpi=300)
+            plt.close()
+
+            return {
+                "optimal_streams": int(optimal_streams),
+                "optimal_throughput": float(optimal_throughput),
+                "saturation_point": int(saturation_point)
+            }
 
     def analyze_rq2_workload_characterization(self) -> Dict:
         """Analyze RQ2: Workload Characterization."""

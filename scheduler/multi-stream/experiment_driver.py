@@ -165,26 +165,47 @@ class ExperimentSuite:
         self.output_dir.mkdir(exist_ok=True)
         self.workload_size = workload_size
 
-    def rq1_stream_scalability(self, trials: int = 10) -> pd.DataFrame:
-        """RQ1: Stream scalability experiment."""
+    def rq1_stream_scalability(self, trials: int = 3) -> pd.DataFrame:
+        """RQ1: Stream scalability experiment with varying workload sizes."""
         print("=== RQ1: Stream Scalability ===")
 
         stream_counts = [1, 2, 4, 8, 16, 32, 64]
+
+        # Test different workload sizes to explore concurrent execution
+        # Smaller sizes allow for true concurrent execution on GPU
+        workload_sizes = [
+            16384,      # 64 KB  - very small, should show high concurrency
+            65536,      # 256 KB - small, good concurrency potential
+            262144,     # 1 MB   - medium, some concurrency
+            1048576,    # 4 MB   - large, limited concurrency
+            4194304,    # 16 MB  - very large, likely serial execution
+        ]
+
         results = []
 
-        for streams in stream_counts:
-            print(f"Testing {streams} streams...")
-            trial_results = self.runner.run_single(
-                streams=streams,
-                kernels=20,
-                workload_size=self.workload_size,
-                kernel_type="mixed",
-                trials=trials
-            )
-            results.extend(trial_results)
+        for size in workload_sizes:
+            size_mb = (size * 4) / (1024 * 1024)
+            print(f"\nTesting workload size: {size_mb:.2f} MB ({size} elements)")
+
+            for streams in stream_counts:
+                print(f"  {streams} streams...", end=" ", flush=True)
+                trial_results = self.runner.run_single(
+                    streams=streams,
+                    kernels=20,
+                    workload_size=size,
+                    kernel_type="mixed",
+                    trials=trials
+                )
+                # Add workload size info to each result
+                for result in trial_results:
+                    result['workload_size_mb'] = size_mb
+                    result['workload_elements'] = size
+                results.extend(trial_results)
+                print("done")
 
         df = pd.DataFrame(results)
         df.to_csv(self.output_dir / "rq1_stream_scalability.csv", index=False)
+        print(f"\n✓ RQ1 complete: {len(df)} data points collected")
         return df
 
     def rq2_workload_characterization(self, trials: int = 10) -> pd.DataFrame:

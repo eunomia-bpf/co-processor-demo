@@ -115,7 +115,7 @@ struct QueueSnapshot {
 
 // Compute metrics from timing data
 void compute_metrics(const std::vector<KernelTiming> &timings,
-                     const BenchmarkConfig &config) {
+                     const BenchmarkConfig &config, int grid_x, int block_x) {
     if (timings.empty()) return;
 
     // Find global start and end times
@@ -286,8 +286,8 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
 
     // CSV output for easy parsing
     printf("CSV: streams,kernels_per_stream,total_kernels,type,wall_time_ms,throughput,mean_lat,p50,p95,p99,");
-    printf("concurrent_rate,overhead,util,jains_index,max_concurrent,avg_concurrent,inversions,working_set_mb,fits_in_l2,stddev\n");
-    printf("CSV: %d,%d,%d,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.4f,%d,%.2f,%d,%.2f,%d,%.2f\n",
+    printf("concurrent_rate,overhead,util,jains_index,max_concurrent,avg_concurrent,inversions,working_set_mb,fits_in_l2,stddev,grid_size,block_size\n");
+    printf("CSV: %d,%d,%d,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.4f,%d,%.2f,%d,%.2f,%d,%.2f,%d,%d\n",
            config.num_streams, config.num_kernels_per_stream, total_kernels,
            config.kernel_type == COMPUTE ? "compute" :
            config.kernel_type == MEMORY ? "memory" :
@@ -295,7 +295,7 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
            total_wall_time, throughput, avg_latency, p50, p95, p99,
            concurrent_rate, scheduler_overhead, gpu_utilization,
            jains_index, max_concurrent, avg_concurrent, priority_inversions,
-           working_set_mb, fits_in_l2 ? 1 : 0, stddev);
+           working_set_mb, fits_in_l2 ? 1 : 0, stddev, grid_x, block_x);
 }
 
 void print_usage(const char *prog_name) {
@@ -566,7 +566,7 @@ int main(int argc, char **argv) {
     }
 
     // Compute and print metrics
-    compute_metrics(timings, config);
+    compute_metrics(timings, config, grid.x, block.x);
 
     // All cleanup is automatic via RAII smart pointers
 

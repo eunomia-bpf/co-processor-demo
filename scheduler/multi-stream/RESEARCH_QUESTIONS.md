@@ -5,17 +5,35 @@ Systematic exploration of CUDA scheduler behavior using micro-benchmarks to unde
 
 ## Research Questions
 
-### RQ1: Stream Scalability
-**Question**: How does concurrent execution rate scale with the number of streams?
+### RQ1: Stream Scalability and Kernel Size Impact on Concurrency
+**Question**: How does concurrent execution rate scale with the number of streams, and how does kernel workload size affect true concurrent execution?
 
-**Hypothesis**: Concurrent execution rate should increase with more streams until hitting hardware limits (e.g., SM count, memory bandwidth).
+**Hypothesis**: Concurrent execution rate should increase with more streams until hitting hardware limits (e.g., SM count, memory bandwidth). Smaller kernel workloads should enable true concurrent execution (max_concurrent > 1), while larger kernels saturate GPU resources and execute serially (max_concurrent = 1).
+
+**Motivation**: Understanding the relationship between kernel size and concurrency is critical for scheduler design. If kernels are too large, they monopolize all GPU resources, preventing concurrent execution even with multiple streams. This experiment explores the kernel size threshold where concurrent execution becomes possible.
 
 **Experiments**:
-- Vary streams: 1, 2, 4, 8, 16, 32, 64
-- Fixed: 20 kernels/stream, mixed workload
-- Metrics: Concurrent execution rate, max concurrent kernels, throughput
+- **Vary streams**: 1, 2, 4, 8, 16, 32, 64
+- **Vary workload sizes**:
+  - 64 KB (16K elements) - very small, should show high concurrency
+  - 256 KB (64K elements) - small, good concurrency potential
+  - 1 MB (256K elements) - medium, some concurrency
+  - 4 MB (1M elements) - large, limited concurrency
+  - 16 MB (4M elements) - very large, likely serial execution
+- **Fixed**: 20 kernels/stream, mixed workload
+- **Metrics**: Concurrent execution rate, max concurrent kernels, throughput, grid/block dimensions
 
-**Expected Insight**: Identify optimal stream count and hardware saturation point.
+**Expected Insights**:
+1. **Kernel Size Threshold**: Identify workload size where `max_concurrent` transitions from 1 (serial) to >1 (concurrent)
+2. **Optimal Configuration**: Find best combination of stream count and kernel size for throughput
+3. **Resource Saturation**: Understand how grid size (number of blocks) affects SM saturation
+4. **Concurrency vs Throughput Trade-off**: Smaller kernels enable concurrency but may reduce throughput due to launch overhead
+
+**Key Metrics to Watch**:
+- `max_concurrent`: Directly shows if kernels run simultaneously (>1) or serially (=1)
+- `concurrent_rate`: Percentage of ideal parallelism achieved
+- `grid_size` and `block_size`: Recorded to correlate with concurrency behavior
+- `throughput`: Overall system performance
 
 ---
 
