@@ -17,9 +17,9 @@ CUDA_ARCH := 75
 NVCC_FLAGS := -arch=sm_$(CUDA_ARCH) \
               -O3 \
               -std=c++14 \
-              -Xcompiler -Wall,-Wextra \
+              -Xcompiler -Wall,-Wextra,-pthread \
               --use_fast_math \
-              -Xlinker -z,noexecstack
+              -Xlinker -z,noexecstack,-lpthread
 
 # Debug flags (use with 'make debug')
 DEBUG_FLAGS := -g -G -O0 -DDEBUG

@@ -193,7 +193,7 @@ class ExperimentSuite:
                     streams=streams,
                     kernels=20,
                     workload_size=size,
-                    kernel_type="mixed",
+                    kernel_type="gemm",
                     trials=trials
                 )
                 # Add workload size info to each result

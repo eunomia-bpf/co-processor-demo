@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <memory>
 #include <functional>
+#include <thread>
+#include <mutex>
 #include "kernels.cuh"
 
 #define CUDA_CHECK(call) \
@@ -494,8 +496,8 @@ int main(int argc, char **argv) {
     CUDA_CHECK(cudaEventRecord(*global_start, 0));
     CUDA_CHECK(cudaEventSynchronize(*global_start));
 
-    // Main benchmark: launch kernels across all streams
-    int event_idx = 0;
+    // Main benchmark: launch kernels across all streams using multi-threading
+    // Each stream gets its own host thread for truly concurrent launching
 
     // Determine kernels per stream (either uniform or custom load imbalance)
     std::vector<int> kernels_to_launch(config.num_streams);
@@ -511,48 +513,88 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Find max kernels for outer loop
-    int max_kernels = *std::max_element(kernels_to_launch.begin(), kernels_to_launch.end());
+    // Pre-allocate per-stream data structures to avoid thread contention
+    std::vector<std::vector<KernelTiming>> per_stream_timings(config.num_streams);
+    std::vector<std::vector<cuda_event_ptr>> per_stream_enqueue_events(config.num_streams);
+    std::vector<std::vector<int>> per_stream_event_indices(config.num_streams);
 
-    for (int k = 0; k < max_kernels; k++) {
-        for (int s = 0; s < config.num_streams; s++) {
-            // Skip if this stream has finished its kernels
-            if (k >= kernels_to_launch[s]) continue;
+    // Pre-calculate event indices for each stream
+    int cumulative_idx = 0;
+    for (int s = 0; s < config.num_streams; s++) {
+        per_stream_timings[s].reserve(kernels_to_launch[s]);
+        per_stream_enqueue_events[s].reserve(kernels_to_launch[s]);
+        per_stream_event_indices[s].reserve(kernels_to_launch[s]);
 
-            auto enqueue_event = make_cuda_event();
-            CUDA_CHECK(cudaEventRecord(*enqueue_event, 0));
+        for (int k = 0; k < kernels_to_launch[s]; k++) {
+            per_stream_event_indices[s].push_back(cumulative_idx++);
+        }
+    }
 
-            CUDA_CHECK(cudaEventRecord(*start_events[event_idx], *streams[s]));
+    // Launch threads - one thread per stream for truly concurrent launching
+    std::vector<std::thread> launch_threads;
 
+    for (int s = 0; s < config.num_streams; s++) {
+        launch_threads.emplace_back([&, s]() {
             // Determine kernel type for this stream
             KernelType current_kernel_type = config.kernel_type;
             if (config.use_heterogeneous && s < (int)config.kernel_types_per_stream.size()) {
                 current_kernel_type = config.kernel_types_per_stream[s];
             }
 
-            launch_kernel(current_kernel_type, d_data[s].get(), d_temp[s].get(),
-                         config.workload_size, grid, block, *streams[s], d_matrix_c[s].get());
+            // Launch all kernels for this stream
+            for (int k = 0; k < kernels_to_launch[s]; k++) {
+                int event_idx = per_stream_event_indices[s][k];
 
-            CUDA_CHECK(cudaEventRecord(*end_events[event_idx], *streams[s]));
+                // Create and record enqueue event
+                auto enqueue_event = make_cuda_event();
+                CUDA_CHECK(cudaEventRecord(*enqueue_event, 0));
+                per_stream_enqueue_events[s].push_back(std::move(enqueue_event));
 
-            KernelTiming timing;
-            timing.stream_id = s;
-            timing.kernel_id = k;
-            timing.priority = stream_priorities[s];
-            timing.kernel_type = current_kernel_type;
+                // Record kernel start event
+                CUDA_CHECK(cudaEventRecord(*start_events[event_idx], *streams[s]));
 
-            // Store enqueue event for later
-            CUDA_CHECK(cudaEventSynchronize(*enqueue_event));
-            CUDA_CHECK(cudaEventElapsedTime(&timing.enqueue_time_ms, *global_start, *enqueue_event));
+                // Launch kernel to this stream
+                launch_kernel(current_kernel_type, d_data[s].get(), d_temp[s].get(),
+                             config.workload_size, grid, block, *streams[s], d_matrix_c[s].get());
 
-            timings.push_back(timing);
+                // Record kernel end event
+                CUDA_CHECK(cudaEventRecord(*end_events[event_idx], *streams[s]));
 
-            event_idx++;
+                // Create timing record
+                KernelTiming timing;
+                timing.stream_id = s;
+                timing.kernel_id = k;
+                timing.priority = stream_priorities[s];
+                timing.kernel_type = current_kernel_type;
+
+                per_stream_timings[s].push_back(timing);
+            }
+
+            // Synchronize this stream when all its kernels are launched
+            CUDA_CHECK(cudaStreamSynchronize(*streams[s]));
+        });
+    }
+
+    // Wait for all launch threads to complete
+    for (auto& thread : launch_threads) {
+        thread.join();
+    }
+
+    // Merge per-stream timings into global timings vector
+    for (int s = 0; s < config.num_streams; s++) {
+        for (size_t k = 0; k < per_stream_timings[s].size(); k++) {
+            timings.push_back(per_stream_timings[s][k]);
         }
     }
 
-    // Wait for all kernels to complete
-    CUDA_CHECK(cudaDeviceSynchronize());
+    // Compute enqueue times for all events
+    for (int s = 0; s < config.num_streams; s++) {
+        for (size_t k = 0; k < per_stream_enqueue_events[s].size(); k++) {
+            int event_idx = per_stream_event_indices[s][k];
+            CUDA_CHECK(cudaEventElapsedTime(&timings[event_idx].enqueue_time_ms,
+                                            *global_start, *per_stream_enqueue_events[s][k]));
+        }
+    }
 
     // Calculate timings
     cudaEvent_t first_event = *start_events[0];

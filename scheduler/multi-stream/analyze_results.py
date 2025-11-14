@@ -91,16 +91,25 @@ class ResultAnalyzer:
             workload_sizes = sorted(df['workload_size_mb'].unique())
             colors = plt.cm.viridis(np.linspace(0, 1, len(workload_sizes)))
 
+            # Get grid sizes for each workload (for legend)
+            workload_grid_map = {}
+            for size_mb in workload_sizes:
+                size_df = df[df['workload_size_mb'] == size_mb]
+                # Get the grid size (should be same for all streams with same workload)
+                grid_size = int(size_df['grid_size'].iloc[0])
+                workload_grid_map[size_mb] = grid_size
+
             # Plot 1: Concurrent execution rate
             for i, size_mb in enumerate(workload_sizes):
                 size_df = df[df['workload_size_mb'] == size_mb]
                 grouped = size_df.groupby('streams').agg({
                     'concurrent_rate': ['mean', 'std']
                 }).reset_index()
+                grid_size = workload_grid_map[size_mb]
                 axes[0, 0].errorbar(grouped['streams'], grouped['concurrent_rate']['mean'],
                                    yerr=grouped['concurrent_rate']['std'],
                                    fmt='o-', linewidth=2, markersize=6,
-                                   label=f'{size_mb:.2f} MB', color=colors[i],
+                                   label=f'{size_mb:.2f} MB ({grid_size} blocks)', color=colors[i],
                                    capsize=4, alpha=0.8)
             axes[0, 0].set_xlabel('Stream Count')
             axes[0, 0].set_ylabel('Concurrent Execution Rate (%)')
@@ -115,10 +124,11 @@ class ResultAnalyzer:
                 grouped = size_df.groupby('streams').agg({
                     'throughput': ['mean', 'std']
                 }).reset_index()
+                grid_size = workload_grid_map[size_mb]
                 axes[0, 1].errorbar(grouped['streams'], grouped['throughput']['mean'],
                                    yerr=grouped['throughput']['std'],
                                    fmt='s-', linewidth=2, markersize=6,
-                                   label=f'{size_mb:.2f} MB', color=colors[i],
+                                   label=f'{size_mb:.2f} MB ({grid_size} blocks)', color=colors[i],
                                    capsize=4, alpha=0.8)
             axes[0, 1].set_xlabel('Stream Count')
             axes[0, 1].set_ylabel('Throughput (kernels/sec)')
@@ -133,10 +143,11 @@ class ResultAnalyzer:
                 grouped = size_df.groupby('streams').agg({
                     'max_concurrent': ['mean', 'std']
                 }).reset_index()
+                grid_size = workload_grid_map[size_mb]
                 axes[1, 0].errorbar(grouped['streams'], grouped['max_concurrent']['mean'],
                                    yerr=grouped['max_concurrent']['std'],
                                    fmt='^-', linewidth=2, markersize=6,
-                                   label=f'{size_mb:.2f} MB', color=colors[i],
+                                   label=f'{size_mb:.2f} MB ({grid_size} blocks)', color=colors[i],
                                    capsize=4, alpha=0.8)
             axes[1, 0].set_xlabel('Stream Count')
             axes[1, 0].set_ylabel('Max Concurrent Kernels')
@@ -151,10 +162,11 @@ class ResultAnalyzer:
                 grouped = size_df.groupby('streams').agg({
                     'util': ['mean', 'std']
                 }).reset_index()
+                grid_size = workload_grid_map[size_mb]
                 axes[1, 1].errorbar(grouped['streams'], grouped['util']['mean'],
                                    yerr=grouped['util']['std'],
                                    fmt='d-', linewidth=2, markersize=6,
-                                   label=f'{size_mb:.2f} MB', color=colors[i],
+                                   label=f'{size_mb:.2f} MB ({grid_size} blocks)', color=colors[i],
                                    capsize=4, alpha=0.8)
             axes[1, 1].set_xlabel('Stream Count')
             axes[1, 1].set_ylabel('GPU Utilization (%)')
@@ -952,9 +964,17 @@ class ResultAnalyzer:
 
         if 'RQ1' in analyses:
             report += "### RQ1: Stream Scalability\n"
-            report += f"- Optimal stream count: {analyses['RQ1']['optimal_streams']}\n"
-            report += f"- Peak throughput: {analyses['RQ1']['optimal_throughput']:.2f} kernels/sec\n"
-            report += f"- Saturation point: ~{analyses['RQ1']['saturation_point']} streams\n\n"
+            if 'best_streams' in analyses['RQ1']:
+                # New multi-workload format
+                report += f"- Best configuration: {analyses['RQ1']['best_streams']} streams, "
+                report += f"{analyses['RQ1']['best_workload_mb']:.2f} MB workload\n"
+                report += f"- Peak throughput: {analyses['RQ1']['best_throughput']:.2f} kernels/sec\n"
+                report += f"- Workload variations tested: {analyses['RQ1']['workload_variations']}\n\n"
+            else:
+                # Legacy single-workload format
+                report += f"- Optimal stream count: {analyses['RQ1']['optimal_streams']}\n"
+                report += f"- Peak throughput: {analyses['RQ1']['optimal_throughput']:.2f} kernels/sec\n"
+                report += f"- Saturation point: ~{analyses['RQ1']['saturation_point']} streams\n\n"
 
         if 'RQ2' in analyses:
             report += "### RQ2: Workload Characterization\n"
