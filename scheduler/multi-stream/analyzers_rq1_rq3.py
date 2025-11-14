@@ -538,32 +538,17 @@ class RQ1_RQ3_Analyzer(BaseAnalyzer):
             axes[1, 0].set_title('RQ3.3: Can priority preempt running kernels?', fontsize=11, fontweight='bold')
 
         # RQ3.4: Per-priority-class latency
-        # Load detailed per-kernel data from CSV files
-        detailed_files = [f for f in os.listdir(self.results_dir) if f.startswith('detailed_kernels_') and f.endswith('.csv')]
+        # Use pre-computed values from main CSV (only priority-enabled runs)
+        if not with_pri_df.empty and 'high_pri_e2e_lat' in with_pri_df.columns and 'low_pri_e2e_lat' in with_pri_df.columns:
+            # Filter out rows with zero values (non-priority runs)
+            priority_data = with_pri_df[(with_pri_df['high_pri_e2e_lat'] > 0) & (with_pri_df['low_pri_e2e_lat'] > 0)]
 
-        if detailed_files:
-            priority_latencies = {'high': [], 'low': []}
-
-            for detail_file in detailed_files:
-                try:
-                    detail_df = pd.read_csv(os.path.join(self.results_dir, detail_file))
-                    # High priority: -5, -4; Low priority: -2, 0
-                    high_pri = detail_df[detail_df['priority'].isin([-5, -4])]['duration_ms']
-                    low_pri = detail_df[detail_df['priority'].isin([-2, 0])]['duration_ms']
-
-                    if not high_pri.empty:
-                        priority_latencies['high'].extend(high_pri.tolist())
-                    if not low_pri.empty:
-                        priority_latencies['low'].extend(low_pri.tolist())
-                except Exception as e:
-                    print(f"Warning: Failed to load {detail_file}: {e}")
-
-            if priority_latencies['high'] and priority_latencies['low']:
-                # Calculate average latencies
-                avg_high = np.mean(priority_latencies['high'])
-                avg_low = np.mean(priority_latencies['low'])
-                std_high = np.std(priority_latencies['high'])
-                std_low = np.std(priority_latencies['low'])
+            if not priority_data.empty:
+                # Calculate average latencies across all priority-enabled runs
+                avg_high = priority_data['high_pri_e2e_lat'].mean()
+                avg_low = priority_data['low_pri_e2e_lat'].mean()
+                std_high = priority_data['high_pri_e2e_lat'].std()
+                std_low = priority_data['low_pri_e2e_lat'].std()
 
                 # Bar chart
                 x_pri = np.arange(2)
@@ -574,7 +559,7 @@ class RQ1_RQ3_Analyzer(BaseAnalyzer):
                                      alpha=0.7, edgecolor='black', linewidth=1.5,
                                      yerr=[std_high, std_low], capsize=5)
 
-                axes[1, 1].set_ylabel('Average Kernel Duration (ms)', fontsize=10)
+                axes[1, 1].set_ylabel('Average End-to-End Latency (ms)', fontsize=10)
                 axes[1, 1].set_xlabel('Priority Class', fontsize=10)
                 axes[1, 1].set_title('RQ3.4: Do high-priority kernels achieve lower latency?', fontsize=11, fontweight='bold')
                 axes[1, 1].set_xticks(x_pri)
@@ -595,15 +580,15 @@ class RQ1_RQ3_Analyzer(BaseAnalyzer):
                            ha='center', fontsize=9,
                            bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.3))
             else:
-                axes[1, 1].text(0.5, 0.5, 'RQ3.4: Insufficient data',
+                axes[1, 1].text(0.5, 0.5, 'RQ3.4: No priority-enabled data available',
                            ha='center', va='center', transform=axes[1, 1].transAxes, fontsize=10)
                 axes[1, 1].set_title('RQ3.4: Do high-priority kernels achieve lower latency?', fontsize=11, fontweight='bold')
         else:
-            axes[1, 1].text(0.5, 0.5, 'RQ3.4: No detailed data files found',
+            axes[1, 1].text(0.5, 0.5, 'RQ3.4: No priority data available',
                        ha='center', va='center', transform=axes[1, 1].transAxes, fontsize=10)
             axes[1, 1].set_title('RQ3.4: Do high-priority kernels achieve lower latency?', fontsize=11, fontweight='bold')
             axes[1, 1].set_xlabel('Priority Class', fontsize=10)
-            axes[1, 1].set_ylabel('Average Latency (ms)', fontsize=10)
+            axes[1, 1].set_ylabel('Average End-to-End Latency (ms)', fontsize=10)
 
         plt.tight_layout()
         plt.savefig(self.figures_dir / "rq3_priority_effectiveness.png", dpi=300)

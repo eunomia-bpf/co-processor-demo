@@ -40,8 +40,9 @@ struct KernelTiming {
     float enqueue_time_ms;
     float start_time_ms;
     float end_time_ms;
-    float duration_ms;
-    float launch_latency_ms;
+    float duration_ms;          // Execution time: end_time - start_time
+    float launch_latency_ms;    // Queue wait time: start_time - enqueue_time
+    float e2e_latency_ms;       // End-to-end latency: end_time - enqueue_time
 };
 
 #endif // COMMON_H

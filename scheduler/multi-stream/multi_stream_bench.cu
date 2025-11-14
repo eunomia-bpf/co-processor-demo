@@ -390,6 +390,8 @@ int main(int argc, char **argv) {
                                         first_event, *end_events[i]));
         timings[i].duration_ms = timings[i].end_time_ms - timings[i].start_time_ms;
         timings[i].launch_latency_ms = timings[i].start_time_ms - timings[i].enqueue_time_ms;
+        // E2E latency = duration + queue wait time (launch_latency is negative)
+        timings[i].e2e_latency_ms = timings[i].duration_ms - timings[i].launch_latency_ms;
     }
 
     // Compute and print metrics
