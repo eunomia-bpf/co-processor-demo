@@ -1,4 +1,4 @@
-NVCCCFLAGS =  -std=c++11 -lcuda  -arch=sm_90 -rdc=true
+NVCCCFLAGS =  -std=c++17 -lcuda  -arch=sm_90
 NVCC = /usr/local/cuda/bin/nvcc
 
 all: 

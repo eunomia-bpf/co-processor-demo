@@ -1,3 +1,6 @@
+#include <cstdint>
+#include <cuda_runtime.h>
+
 int read_MNIST_train_labels(uint32_t &magic_number_label,
                             uint32_t &number_of_labels, uint8_t *&train_labels);
 

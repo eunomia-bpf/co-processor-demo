@@ -3,6 +3,7 @@ by Qin Yu, Apr 2019
 */
 
 #include <fstream>
+#include <cstdint>
 using namespace std;
 
 uint32_t read_little_endian_int(uint32_t little_indian_int) {
