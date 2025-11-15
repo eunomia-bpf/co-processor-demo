@@ -339,58 +339,166 @@ OSDI 级别解读可以是：
 
 ---
 
-### Sub‑RQ4.3：Priority 对“短任务在长任务背景”场景的提升
+### Sub‑RQ4.3：Fast kernel P99 在 RT vs BE 混合场景
 
-**问题**：典型 RT vs BE 场景：短小“前景任务”在长 kernel 背景下，priority 能否改善短任务 tail latency？
+**问题**：短小"前景任务"在长 kernel 背景下，priority 能否改善短任务 tail latency？
+
 **配置**：
 
 * 两类 kernel：
-
-  * Fast：short compute/memory kernel（几十 µs）
-  * Slow：长 compute/gemm kernel（几 ms ~ 三位数 ms）
+  * Fast：size=65536（compute type, ~几十 µs）
+  * Slow：size=4194304（memory type, ~几 ms）
 * 三种配置：
+  1. Only Fast: 4 streams, 40 kernels each, 所有 fast kernels
+  2. Fast+Slow, no priority: 4 streams（前 2 个 fast, 后 2 个 slow）, load-imbalance=40,40,10,10
+  3. Fast+Slow, with priority: 同配置 2，但 fast streams priority=-5, slow streams priority=0
 
-  1. Only Fast（单租户 baseline）
-  2. Fast+Slow，无 priority
-  3. Fast+Slow，有 priority（Fast 在高优先级 stream）
+**测量方法**：
+
+* 使用 raw per-kernel CSV（`--csv-output`）
+* **关键**：只统计 fast kernels（stream_id in {0, 1}）的 P99
+* 指标：`e2e_latency_ms` 的第 99 百分位（仅 fast kernels）
+* 聚合：按配置分组，计算 mean/std across runs
 
 **图**：
 
 * 柱状图
-* X：三个配置（或 1,2,3）
-* Y：Fast kernels 的 `e2e_p99`
-* 每根柱可加 error bar（多 run 标准差）
-
-OSDI 级结论：
-
-* 可以写成 “priority 在某些硬件上只把 P99 从 100ms 拉回到 80ms，但离单租户 10ms 还是很远”；
-* 或者 “在某些架构上 block 粒度软 preemption 有效，P99 几乎回到单租户水平”。
+* X：三个配置
+* Y：Fast kernels 的 `e2e_p99`（ms）
+* Error bar：多 run 标准差
 
 ---
 
-### Sub‑RQ4.4：Jain’s Fairness vs priority 配置
+### Sub‑RQ4.4：Jain's Fairness vs priority 配置
 
 **问题**：priority 对不同 stream 之间 GPU 时间占用的公平性有什么影响？
+
 **配置**：
 
+* 8 streams, 30 kernels each, size=1M
 * 多种 priority pattern：
+  * All Equal: 0,0,0,0,0,0,0,0
+  * 1H-7L: -5,0,0,0,0,0,0,0
+  * 2H-6L: -5,-5,0,0,0,0,0,0
+  * 4H-4L: -5,-5,-5,-5,0,0,0,0
+  * Multi-Level: -10,-8,-5,-3,0,0,0,0
 
-  * all equal
-  * small fraction high, majority low
-  * many different levels
-* 每种 pattern 下测 aggregated CSV 的 `jains_index`（基于 per‑stream duration）
+**测量方法**：
+
+* 使用 aggregated CSV 的 `jains_index`（基于 per-stream total duration）
+* 每种 pattern 多 run，计算 mean/std
+* Pattern 名称直接存储到结果 CSV（避免 position-based 推断）
 
 **图**：
 
 * 柱状图
-* X：priority pattern（可以用标签：EQ / 1H-3L / 1H-7L-…）
-* Y：`jains_index`
-
-可用来解释：priority 机制实质上就是在“牺牲公平性”的基础上改善某些 stream latency，对 OS paper 来说这句非常 natural。
+* X：priority pattern
+* Y：`jains_index`（0-1, 越接近 1 越公平）
+* Error bar：std across runs
 
 ---
 
-## RQ5：异构 / 负载不均衡与公平性（Heterogeneity & Imbalance）
+## RQ5：Preemption Latency（抢占延迟分析）
+
+**问题**：测量高优先级 kernel 到达时 GPU 正忙于低优先级 kernel 的情况下，等待调度的延迟
+
+**设计核心**：
+
+* 反转 workload：少量高优先级 kernel，大量低优先级 kernel saturate GPU
+* 只统计"被阻塞的 kernel"：高优先级 kernel 到达时 GPU 正在执行低优先级 work
+* 配置：2 high-prio streams（稀疏）+ 6 low-prio streams（密集）
+
+**过滤方法**：
+
+```python
+# 1. 构建低优先级 kernel 执行时间区间
+lo_intervals = [(start_ms, end_ms) for each low-prio kernel]
+
+# 2. 判断高优先级 kernel 到达时 GPU 是否被占用
+def is_gpu_busy_with_low_prio(enqueue_time):
+    return any(start <= enqueue_time < end for start, end in lo_intervals)
+
+# 3. 只对被阻塞的高优先级 kernel 计算 preemption latency
+hi_blocked = hi[hi['enqueue_time_ms'].apply(is_gpu_busy_with_low_prio)]
+preempt_latency = hi_blocked['start_time_ms'] - hi_blocked['enqueue_time_ms']
+```
+
+**关键指标**：
+
+* `preempt_latency_ms`：start_time - enqueue_time（仅 blocked kernels）
+* `blocked_ratio`：被阻塞的高优先级 kernel 占比
+* `num_blocked_kernels`：实际被阻塞的样本数
+
+---
+
+### Sub‑RQ5.1：Preemption latency vs background kernel duration
+
+**问题**：背景低优先级 kernel 的执行时长如何影响抢占延迟？
+
+**配置**：
+
+* 2 high-prio streams (priority=-5, 20 kernels each)
+* 6 low-prio streams (priority=0, 100 kernels each)
+* Sweep background kernel size: [65536, 262144, 1048576, 4194304]
+
+**测量方法**：
+
+* 使用 raw CSV，过滤 blocked high-prio kernels
+* 指标：`preempt_latency_ms` 的 mean, P99, max
+* 附加指标：`blocked_ratio`, `num_blocked_kernels`
+
+**图**：
+
+* 折线图（log-log scale）
+* X：Background kernel size (elements)
+* Y：Preemption latency (ms)
+* 三条线：Mean, P99, Max
+
+---
+
+### Sub‑RQ5.2：Preemption latency vs offered load
+
+**问题**：高优先级 kernel 到达频率对抢占延迟的影响
+
+**配置**：
+
+* 2 high-prio streams (priority=-5, 50 kernels each)
+* 6 low-prio streams (priority=0, 50 kernels each, fixed 500Hz)
+* High-prio frequency sweep: [20, 50, 100, 200, 500, 1000] Hz
+* Background kernel size: 1M
+
+**测量方法**：
+
+* 使用 raw CSV，过滤 blocked high-prio kernels
+* 指标：`preempt_latency_ms` 的 mean, P50, P95, P99, max
+* 附加指标：`blocked_ratio`, `num_blocked_kernels`
+
+**图**：
+
+* 折线图
+* X：High-priority launch frequency (Hz, log scale)
+* Y：Preemption latency (ms)
+* 三条线：P99, Mean, P95
+
+---
+
+### Sub‑RQ5.3 & 5.4：Preemption latency CDF
+
+**问题**：用 CDF 展示 preemption latency 的完整分布
+
+**Sub-RQ5.3**: Small vs large background kernels
+* 数据：从 RQ5.1 的 raw CSV 中提取
+* 对比：65k (small) vs 4M (large) 的所有 blocked kernels
+* 图：CDF，X 轴 preemption latency (ms), Y 轴 CDF
+
+**Sub-RQ5.4**: Low vs high offered load
+* 数据：从 RQ5.2 的 raw CSV 中提取
+* 对比：20Hz (low load) vs 1000Hz (high load) 的所有 blocked kernels
+* 图：CDF，X 轴 preemption latency (ms), Y 轴 CDF
+
+---
+
+## RQ6：异构 / 负载不均衡与公平性（Heterogeneity & Imbalance）
 
 这里主要利用：
 
@@ -398,7 +506,7 @@ OSDI 级结论：
 * `kernel_types_per_stream`（heterogeneous）
 * aggregated 的 Jain 指数 + raw per‑stream metrics。
 
-### Sub‑RQ5.1：Jain’s index vs 负载不均衡程度
+### Sub‑RQ6.1：Jain's index vs 负载不均衡程度
 
 **问题**：给不同 stream 分配不同任务量时，GPU 时间分配的公平性随不均衡程度如何变化？
 **配置**：

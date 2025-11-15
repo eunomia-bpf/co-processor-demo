@@ -39,16 +39,18 @@ class RQ5(RQBase):
 
         Measures how preemption latency (start - enqueue for high-priority tasks)
         varies with background kernel duration. Similar to XSched Fig.11(b).
+
+        DESIGN: To measure true preemption latency:
+        - FEW high-priority streams (2) with sparse arrivals
+        - MANY low-priority streams (6) saturating GPU with long kernels
+        - This ensures high-prio kernels arrive when GPU is busy with low-prio work
         """
         print("  RQ5.1: Preemption latency vs kernel duration")
 
-        # We'll use raw CSV output to calculate preemption latency
-        # High priority: 4 streams with small fast kernels
-        # Low priority: 4 streams with varying duration kernels
-
+        # REVERSED: Few high-prio, many low-prio (opposite of before)
         num_streams = 8
-        high_prio_streams = 4
-        low_prio_streams = 4
+        high_prio_streams = 2  # REDUCED from 4
+        low_prio_streams = 6   # INCREASED from 4
 
         # Sweep background kernel durations
         bg_kernel_sizes = [
@@ -62,15 +64,16 @@ class RQ5(RQBase):
             print(f"    Background kernel size={bg_size} ({bg_label})")
 
             for run_idx in range(self.num_runs):
-                # Priority spec: first 4 high (-5), last 4 low (0)
+                # Priority spec: first 2 high (-5), last 6 low (0)
                 prio_spec = ','.join(['-5'] * high_prio_streams + ['0'] * low_prio_streams)
 
                 # Per-stream sizes: high-prio gets small fixed size, low-prio gets variable bg_size
                 size_spec = ','.join(['65536'] * high_prio_streams + [str(bg_size)] * low_prio_streams)
 
-                # Load imbalance: high-prio streams launch more frequently
-                # We want high-prio to keep issuing work while low-prio runs long kernels
-                load_spec = ','.join(['100'] * high_prio_streams + ['20'] * low_prio_streams)
+                # REVERSED load imbalance: low-prio launches MUCH MORE to saturate GPU
+                # High-prio: sparse arrivals (20 kernels total)
+                # Low-prio: heavy load (100 kernels per stream = 600 total)
+                load_spec = ','.join(['20'] * high_prio_streams + ['100'] * low_prio_streams)
 
                 raw_csv_file = self.output_dir / f'rq5_1_raw_bg{bg_size}_run{run_idx}.csv'
 
@@ -103,7 +106,12 @@ class RQ5(RQBase):
         self._aggregate_rq5_1_data(bg_kernel_sizes)
 
     def _aggregate_rq5_1_data(self, bg_kernel_sizes):
-        """Aggregate RQ5.1 raw CSV files and compute preemption latency metrics."""
+        """
+        Aggregate RQ5.1 raw CSV files and compute preemption latency metrics.
+
+        KEY CHANGE: Only measure preemption latency for high-priority kernels that
+        arrived when GPU was busy with low-priority kernels (true preemption scenario).
+        """
         aggregated_data = []
 
         for bg_size, bg_label in bg_kernel_sizes:
@@ -119,26 +127,47 @@ class RQ5(RQBase):
 
                 df = pd.read_csv(raw_file)
 
-                # Filter high-priority tasks (priority < 0)
-                high_prio = df[df['priority'] < 0].copy()
+                # Separate high and low priority kernels
+                hi = df[df['priority'] < 0].copy()
+                lo = df[df['priority'] >= 0].copy()
 
-                if len(high_prio) == 0:
+                if len(hi) == 0 or len(lo) == 0:
                     continue
 
-                # Calculate preemption latency: start_time - enqueue_time
-                high_prio['preempt_latency_ms'] = high_prio['start_time_ms'] - high_prio['enqueue_time_ms']
+                # Build intervals when low-priority kernels were running
+                lo_intervals = list(zip(lo['start_time_ms'], lo['end_time_ms']))
+
+                def is_gpu_busy_with_low_prio(enqueue_t):
+                    """Check if any low-priority kernel was running at time t."""
+                    for start, end in lo_intervals:
+                        if start <= enqueue_t < end:
+                            return True
+                    return False
+
+                # Filter: only high-prio kernels that arrived when GPU was busy
+                hi['gpu_busy'] = hi['enqueue_time_ms'].apply(is_gpu_busy_with_low_prio)
+                hi_blocked = hi[hi['gpu_busy']].copy()
+
+                # Calculate preemption latency for blocked kernels only
+                if len(hi_blocked) == 0:
+                    # If no kernels were blocked, skip this run
+                    continue
+
+                hi_blocked['preempt_latency_ms'] = hi_blocked['start_time_ms'] - hi_blocked['enqueue_time_ms']
 
                 # Aggregate statistics
                 row = {
                     'bg_kernel_size': bg_size,
                     'bg_label': bg_label,
-                    'preempt_latency_mean': high_prio['preempt_latency_ms'].mean(),
-                    'preempt_latency_p50': high_prio['preempt_latency_ms'].quantile(0.50),
-                    'preempt_latency_p95': high_prio['preempt_latency_ms'].quantile(0.95),
-                    'preempt_latency_p99': high_prio['preempt_latency_ms'].quantile(0.99),
-                    'preempt_latency_max': high_prio['preempt_latency_ms'].max(),
-                    'high_prio_duration_mean': high_prio['duration_ms'].mean(),
-                    'num_high_prio_kernels': len(high_prio),
+                    'preempt_latency_mean': hi_blocked['preempt_latency_ms'].mean(),
+                    'preempt_latency_p50': hi_blocked['preempt_latency_ms'].quantile(0.50),
+                    'preempt_latency_p95': hi_blocked['preempt_latency_ms'].quantile(0.95),
+                    'preempt_latency_p99': hi_blocked['preempt_latency_ms'].quantile(0.99),
+                    'preempt_latency_max': hi_blocked['preempt_latency_ms'].max(),
+                    'high_prio_duration_mean': hi_blocked['duration_ms'].mean(),
+                    'num_high_prio_kernels': len(hi),
+                    'num_blocked_kernels': len(hi_blocked),
+                    'blocked_ratio': len(hi_blocked) / len(hi) if len(hi) > 0 else 0,
                 }
                 aggregated_data.append(row)
 
@@ -154,6 +183,8 @@ class RQ5(RQBase):
                 'preempt_latency_max': ['mean', 'std'],
                 'high_prio_duration_mean': 'mean',
                 'num_high_prio_kernels': 'sum',
+                'num_blocked_kernels': 'sum',
+                'blocked_ratio': 'mean',
             }).reset_index()
 
             # Flatten column names
@@ -168,37 +199,49 @@ class RQ5(RQBase):
         """
         RQ5.2: Preemption latency vs offered load.
 
-        Measures how preemption latency varies with system load (launch frequency).
-        Similar to XSched Fig.11(c).
+        Measures how preemption latency varies with high-priority arrival rate,
+        while keeping GPU saturated with low-priority background work.
+
+        DESIGN: Fixed heavy background load + sweep high-priority arrival rate
+        - Low-prio: Fixed high frequency (500Hz) to saturate GPU
+        - High-prio: Variable frequency (20-1000Hz) to measure preemption under load
         """
         print("  RQ5.2: Preemption latency vs offered load")
 
         num_streams = 8
-        high_prio_streams = 4
-        low_prio_streams = 4
+        high_prio_streams = 2  # REDUCED: sparse high-prio streams
+        low_prio_streams = 6   # INCREASED: saturate with low-prio
 
-        # Fixed kernel duration, sweep launch frequencies
-        kernel_size = 262144  # ~0.5ms
+        # Use heterogeneous kernel sizes: high-prio small (RT), low-prio large (BE)
+        hi_prio_size = 65536    # Small/fast (~0.1ms, RT kernels)
+        lo_prio_size = 1048576  # Large/slow (~2ms, BE kernels)
 
-        launch_frequencies = [20, 50, 100, 200, 500, 1000]  # Hz
+        # Sweep HIGH-PRIORITY arrival rates (not global)
+        hi_prio_frequencies = [20, 50, 100, 200, 500, 1000]  # Hz
+        lo_prio_freq = 500  # Fixed: keep background saturated
 
-        for freq in launch_frequencies:
-            print(f"    Launch frequency={freq}Hz")
+        for hi_freq in hi_prio_frequencies:
+            print(f"    High-prio freq={hi_freq}Hz, Low-prio freq={lo_prio_freq}Hz (background)")
 
             for run_idx in range(self.num_runs):
-                # Priority spec: first 4 high (-5), last 4 low (0)
+                # Priority spec: first 2 high (-5), last 6 low (0)
                 prio_spec = ','.join(['-5'] * high_prio_streams + ['0'] * low_prio_streams)
 
-                # All streams same frequency
-                freq_spec = ','.join([str(freq)] * num_streams)
+                # Different frequencies: high-prio variable, low-prio fixed high
+                freq_spec = ','.join([str(hi_freq)] * high_prio_streams +
+                                    [str(lo_prio_freq)] * low_prio_streams)
 
-                raw_csv_file = self.output_dir / f'rq5_2_raw_freq{freq}_run{run_idx}.csv'
+                # Per-stream sizes: high-prio small, low-prio large
+                sizes_spec = ','.join([str(hi_prio_size)] * high_prio_streams +
+                                     [str(lo_prio_size)] * low_prio_streams)
+
+                raw_csv_file = self.output_dir / f'rq5_2_raw_freq{hi_freq}_run{run_idx}.csv'
 
                 args = [
                     '--streams', str(num_streams),
                     '--kernels', '50',
-                    '--size', str(kernel_size),
                     '--type', 'mixed',
+                    '--per-stream-sizes', sizes_spec,
                     '--priority', prio_spec,
                     '--launch-frequency', freq_spec,
                     '--csv-output', str(raw_csv_file),
@@ -219,7 +262,7 @@ class RQ5(RQBase):
 
         # Aggregate
         print("    Aggregating raw CSV files...")
-        self._aggregate_rq5_2_data(launch_frequencies)
+        self._aggregate_rq5_2_data(hi_prio_frequencies)
 
     def _aggregate_rq5_2_data(self, launch_frequencies):
         """Aggregate RQ5.2 raw CSV files and compute preemption latency vs load."""
@@ -238,39 +281,80 @@ class RQ5(RQBase):
 
                 df = pd.read_csv(raw_file)
 
-                # Filter high-priority tasks
-                high_prio = df[df['priority'] < 0].copy()
+                # Separate high-priority and low-priority kernels
+                hi = df[df['priority'] < 0].copy()
+                lo = df[df['priority'] >= 0].copy()
 
-                if len(high_prio) == 0:
+                if len(hi) == 0:
                     continue
 
-                # Calculate preemption latency
-                high_prio['preempt_latency_ms'] = high_prio['start_time_ms'] - high_prio['enqueue_time_ms']
+                # Build low-priority execution intervals to detect GPU busy periods
+                lo_intervals = list(zip(lo['start_time_ms'], lo['end_time_ms']))
+
+                def is_gpu_busy_with_low_prio(enqueue_t):
+                    """Check if GPU was busy with low-priority work when kernel was enqueued."""
+                    for start, end in lo_intervals:
+                        if start <= enqueue_t < end:
+                            return True
+                    return False
+
+                # Filter: only measure latency for kernels that arrived when GPU was busy
+                hi['gpu_busy'] = hi['enqueue_time_ms'].apply(is_gpu_busy_with_low_prio)
+                hi_blocked = hi[hi['gpu_busy']].copy()
+
+                # Calculate preemption latency for blocked kernels
+                if len(hi_blocked) > 0:
+                    hi_blocked['preempt_latency_ms'] = hi_blocked['start_time_ms'] - hi_blocked['enqueue_time_ms']
+
+                    preempt_mean = hi_blocked['preempt_latency_ms'].mean()
+                    preempt_p50 = hi_blocked['preempt_latency_ms'].quantile(0.50)
+                    preempt_p95 = hi_blocked['preempt_latency_ms'].quantile(0.95)
+                    preempt_p99 = hi_blocked['preempt_latency_ms'].quantile(0.99)
+                    preempt_max = hi_blocked['preempt_latency_ms'].max()
+                    num_blocked = len(hi_blocked)
+                else:
+                    # No blocked kernels in this run
+                    preempt_mean = 0.0
+                    preempt_p50 = 0.0
+                    preempt_p95 = 0.0
+                    preempt_p99 = 0.0
+                    preempt_max = 0.0
+                    num_blocked = 0
 
                 # Aggregate statistics
+                # offered_load: total arrival rate = 2*hi_freq + 6*lo_freq (500Hz fixed)
+                hi_prio_load = 2 * freq  # 2 high-prio streams
+                lo_prio_load = 6 * 500   # 6 low-prio streams at 500Hz
+                total_offered_load = hi_prio_load + lo_prio_load
+
                 row = {
-                    'launch_freq': freq,
-                    'offered_load': freq * len(df['stream_id'].unique()),  # approx kernels/sec
-                    'preempt_latency_mean': high_prio['preempt_latency_ms'].mean(),
-                    'preempt_latency_p50': high_prio['preempt_latency_ms'].quantile(0.50),
-                    'preempt_latency_p95': high_prio['preempt_latency_ms'].quantile(0.95),
-                    'preempt_latency_p99': high_prio['preempt_latency_ms'].quantile(0.99),
-                    'preempt_latency_max': high_prio['preempt_latency_ms'].max(),
-                    'num_high_prio_kernels': len(high_prio),
+                    'hi_prio_freq': freq,  # High-priority arrival rate per stream
+                    'hi_prio_load': hi_prio_load,  # Total high-prio arrival rate
+                    'total_offered_load': total_offered_load,  # Total system load
+                    'preempt_latency_mean': preempt_mean,
+                    'preempt_latency_p50': preempt_p50,
+                    'preempt_latency_p95': preempt_p95,
+                    'preempt_latency_p99': preempt_p99,
+                    'preempt_latency_max': preempt_max,
+                    'num_high_prio_kernels': len(hi),
+                    'num_blocked_kernels': num_blocked,
+                    'blocked_ratio': num_blocked / len(hi) if len(hi) > 0 else 0.0,
                 }
                 aggregated_data.append(row)
 
         if aggregated_data:
             agg_df = pd.DataFrame(aggregated_data)
 
-            # Group by launch_freq and compute mean/std across runs
-            final_df = agg_df.groupby(['launch_freq', 'offered_load']).agg({
+            # Group by hi_prio_freq and compute mean/std across runs
+            final_df = agg_df.groupby(['hi_prio_freq', 'hi_prio_load', 'total_offered_load']).agg({
                 'preempt_latency_mean': ['mean', 'std'],
                 'preempt_latency_p50': ['mean', 'std'],
                 'preempt_latency_p95': ['mean', 'std'],
                 'preempt_latency_p99': ['mean', 'std'],
                 'preempt_latency_max': ['mean', 'std'],
                 'num_high_prio_kernels': 'sum',
+                'num_blocked_kernels': 'sum',
+                'blocked_ratio': 'mean',
             }).reset_index()
 
             # Flatten column names
@@ -325,7 +409,7 @@ class RQ5(RQBase):
                 marker='^', linewidth=2, markersize=6, color='red', alpha=0.4, label='Max')
 
         # Add annotations with kernel duration labels
-        for idx, row in df_sorted.iterrows():
+        for _, row in df_sorted.iterrows():
             ax.annotate(f"{row['bg_label']}",
                        (row['bg_kernel_size'], row['preempt_latency_p99_mean']),
                        xytext=(0, 10), textcoords='offset points',
@@ -354,18 +438,18 @@ class RQ5(RQBase):
             ax.set_title('(b) Preemption Latency vs Offered Load')
             return
 
-        # Sort by launch frequency for proper line plotting
-        df_sorted = df.sort_values('launch_freq')
+        # Sort by high-priority frequency for proper line plotting
+        df_sorted = df.sort_values('hi_prio_freq')
 
-        # Plot P99 preemption latency vs launch frequency
-        ax.plot(df_sorted['launch_freq'], df_sorted['preempt_latency_p99_mean'],
+        # Plot P99 preemption latency vs high-priority launch frequency
+        ax.plot(df_sorted['hi_prio_freq'], df_sorted['preempt_latency_p99_mean'],
                 marker='o', linewidth=2, markersize=8, color='darkred', label='P99')
-        ax.plot(df_sorted['launch_freq'], df_sorted['preempt_latency_mean_mean'],
+        ax.plot(df_sorted['hi_prio_freq'], df_sorted['preempt_latency_mean_mean'],
                 marker='s', linewidth=2, markersize=6, color='orange', alpha=0.6, label='Mean')
-        ax.plot(df_sorted['launch_freq'], df_sorted['preempt_latency_p95_mean'],
+        ax.plot(df_sorted['hi_prio_freq'], df_sorted['preempt_latency_p95_mean'],
                 marker='d', linewidth=2, markersize=6, color='green', alpha=0.5, label='P95')
 
-        ax.set_xlabel('Launch Frequency (Hz)')
+        ax.set_xlabel('High-Priority Launch Frequency (Hz)')
         ax.set_ylabel('Preemption Latency (ms)')
         ax.set_title('(b) Preemption Latency vs Offered Load')
         ax.legend()
@@ -426,25 +510,45 @@ class RQ5(RQBase):
         small_all = pd.concat(small_dfs, ignore_index=True)
         large_all = pd.concat(large_dfs, ignore_index=True)
 
-        # Filter for high-priority tasks only (priority < 0)
-        small_high_prio = small_all[small_all['priority'] < 0].copy()
-        large_high_prio = large_all[large_all['priority'] < 0].copy()
+        # Filter for blocked high-priority tasks only
+        def filter_blocked_kernels(df):
+            """Filter high-priority kernels that arrived when GPU was busy with low-priority work."""
+            hi = df[df['priority'] < 0].copy()
+            lo = df[df['priority'] >= 0].copy()
 
-        # Calculate preemption latency
-        small_high_prio['preempt_latency'] = small_high_prio['start_time_ms'] - small_high_prio['enqueue_time_ms']
-        large_high_prio['preempt_latency'] = large_high_prio['start_time_ms'] - large_high_prio['enqueue_time_ms']
+            if len(hi) == 0 or len(lo) == 0:
+                return hi
+
+            # Build low-priority execution intervals
+            lo_intervals = list(zip(lo['start_time_ms'], lo['end_time_ms']))
+
+            def is_gpu_busy_with_low_prio(enqueue_t):
+                for start, end in lo_intervals:
+                    if start <= enqueue_t < end:
+                        return True
+                return False
+
+            hi['gpu_busy'] = hi['enqueue_time_ms'].apply(is_gpu_busy_with_low_prio)
+            return hi[hi['gpu_busy']].copy()
+
+        small_blocked = filter_blocked_kernels(small_all)
+        large_blocked = filter_blocked_kernels(large_all)
+
+        # Calculate preemption latency for blocked kernels
+        small_blocked['preempt_latency'] = small_blocked['start_time_ms'] - small_blocked['enqueue_time_ms']
+        large_blocked['preempt_latency'] = large_blocked['start_time_ms'] - large_blocked['enqueue_time_ms']
 
         # Plot CDFs
-        small_sorted = np.sort(small_high_prio['preempt_latency'].values)
-        large_sorted = np.sort(large_high_prio['preempt_latency'].values)
+        small_sorted = np.sort(small_blocked['preempt_latency'].values)
+        large_sorted = np.sort(large_blocked['preempt_latency'].values)
 
         small_cdf = np.arange(1, len(small_sorted) + 1) / len(small_sorted)
         large_cdf = np.arange(1, len(large_sorted) + 1) / len(large_sorted)
 
         ax.plot(small_sorted, small_cdf, linewidth=2, color='blue',
-               label=f'Small BG Kernel (65k, n={len(small_high_prio)})')
+               label=f'Small BG Kernel (65k, n={len(small_blocked)})')
         ax.plot(large_sorted, large_cdf, linewidth=2, color='red',
-               label=f'Large BG Kernel (4M, n={len(large_high_prio)})')
+               label=f'Large BG Kernel (4M, n={len(large_blocked)})')
 
         ax.set_xlabel('Preemption Latency (ms)')
         ax.set_ylabel('CDF')
@@ -508,25 +612,45 @@ class RQ5(RQBase):
         low_all = pd.concat(low_dfs, ignore_index=True)
         high_all = pd.concat(high_dfs, ignore_index=True)
 
-        # Filter for high-priority tasks only (priority < 0)
-        low_high_prio = low_all[low_all['priority'] < 0].copy()
-        high_high_prio = high_all[high_all['priority'] < 0].copy()
+        # Filter for blocked high-priority tasks only
+        def filter_blocked_kernels(df):
+            """Filter high-priority kernels that arrived when GPU was busy with low-priority work."""
+            hi = df[df['priority'] < 0].copy()
+            lo = df[df['priority'] >= 0].copy()
 
-        # Calculate preemption latency
-        low_high_prio['preempt_latency'] = low_high_prio['start_time_ms'] - low_high_prio['enqueue_time_ms']
-        high_high_prio['preempt_latency'] = high_high_prio['start_time_ms'] - high_high_prio['enqueue_time_ms']
+            if len(hi) == 0 or len(lo) == 0:
+                return hi
+
+            # Build low-priority execution intervals
+            lo_intervals = list(zip(lo['start_time_ms'], lo['end_time_ms']))
+
+            def is_gpu_busy_with_low_prio(enqueue_t):
+                for start, end in lo_intervals:
+                    if start <= enqueue_t < end:
+                        return True
+                return False
+
+            hi['gpu_busy'] = hi['enqueue_time_ms'].apply(is_gpu_busy_with_low_prio)
+            return hi[hi['gpu_busy']].copy()
+
+        low_blocked = filter_blocked_kernels(low_all)
+        high_blocked = filter_blocked_kernels(high_all)
+
+        # Calculate preemption latency for blocked kernels
+        low_blocked['preempt_latency'] = low_blocked['start_time_ms'] - low_blocked['enqueue_time_ms']
+        high_blocked['preempt_latency'] = high_blocked['start_time_ms'] - high_blocked['enqueue_time_ms']
 
         # Plot CDFs
-        low_sorted = np.sort(low_high_prio['preempt_latency'].values)
-        high_sorted = np.sort(high_high_prio['preempt_latency'].values)
+        low_sorted = np.sort(low_blocked['preempt_latency'].values)
+        high_sorted = np.sort(high_blocked['preempt_latency'].values)
 
         low_cdf = np.arange(1, len(low_sorted) + 1) / len(low_sorted)
         high_cdf = np.arange(1, len(high_sorted) + 1) / len(high_sorted)
 
         ax.plot(low_sorted, low_cdf, linewidth=2, color='green',
-               label=f'Low Load (20Hz, n={len(low_high_prio)})')
+               label=f'Low Load (20Hz, n={len(low_blocked)})')
         ax.plot(high_sorted, high_cdf, linewidth=2, color='purple',
-               label=f'High Load (1000Hz, n={len(high_high_prio)})')
+               label=f'High Load (1000Hz, n={len(high_blocked)})')
 
         ax.set_xlabel('Preemption Latency (ms)')
         ax.set_ylabel('CDF')
