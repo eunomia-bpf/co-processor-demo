@@ -109,12 +109,10 @@ class RQ4_RQ8_Analyzer:
             ax1.legend()
             ax1.grid(True, alpha=0.3)
 
-        # RQ4.2: Per-priority P99 vs offered load
-        print("  RQ4.2: Per-priority P99 vs load")
+        # RQ4.2: Per-priority P99 vs launch frequency
+        print("  RQ4.2: Per-priority P99 vs launch frequency")
         df = self.load_csv('rq4_2_per_priority_vs_load.csv')
         if df is not None:
-            df['offered_load'] = df['total_kernels'] / (df['wall_time_ms'] / 1000.0)
-
             def parse_priorities(row):
                 if pd.isna(row['per_priority_p99']):
                     return None, None
@@ -137,34 +135,38 @@ class RQ4_RQ8_Analyzer:
 
             df_sorted = df.dropna(subset=['high_prio_p99', 'low_prio_p99'])
             if len(df_sorted) > 0:
-                grouped = df_sorted.groupby(pd.cut(df_sorted['offered_load'], bins=6)).agg({
+                # Group by launch frequency instead of offered load
+                grouped = df_sorted.groupby('launch_freq').agg({
                     'high_prio_p99': ['mean', 'std'],
-                    'low_prio_p99': ['mean', 'std'],
-                    'offered_load': 'mean'
-                }).reset_index(drop=True)
+                    'low_prio_p99': ['mean', 'std']
+                }).reset_index()
 
-                grouped.columns = ['high_p99_mean', 'high_p99_std', 'low_p99_mean',
-                                   'low_p99_std', 'offered_load']
+                grouped.columns = ['launch_freq', 'high_p99_mean', 'high_p99_std',
+                                   'low_p99_mean', 'low_p99_std']
 
-                ax2.plot(grouped['offered_load'], grouped['high_p99_mean'],
+                # Sort by launch frequency to ensure proper line drawing
+                grouped = grouped.sort_values('launch_freq')
+
+                ax2.plot(grouped['launch_freq'], grouped['high_p99_mean'],
                          marker='o', label='High Priority', linewidth=2, color='blue')
-                ax2.fill_between(grouped['offered_load'],
+                ax2.fill_between(grouped['launch_freq'],
                                  grouped['high_p99_mean'] - grouped['high_p99_std'],
                                  grouped['high_p99_mean'] + grouped['high_p99_std'],
                                  alpha=0.2, color='blue')
 
-                ax2.plot(grouped['offered_load'], grouped['low_p99_mean'],
+                ax2.plot(grouped['launch_freq'], grouped['low_p99_mean'],
                          marker='s', label='Low Priority', linewidth=2, color='red')
-                ax2.fill_between(grouped['offered_load'],
+                ax2.fill_between(grouped['launch_freq'],
                                  grouped['low_p99_mean'] - grouped['low_p99_std'],
                                  grouped['low_p99_mean'] + grouped['low_p99_std'],
                                  alpha=0.2, color='red')
 
-                ax2.set_xlabel('Offered Load (kernels/sec)')
+                ax2.set_xlabel('Launch Frequency (Hz)')
                 ax2.set_ylabel('E2E P99 Latency (ms)')
-                ax2.set_title('(b) Per-Priority P99 Latency vs Offered Load')
+                ax2.set_title('(b) Per-Priority P99 Latency vs Launch Frequency')
                 ax2.legend()
                 ax2.grid(True, alpha=0.3)
+                ax2.set_xscale('log')  # Use log scale for better visualization of 20-1000 Hz range
             else:
                 print("    Warning: No valid priority data found")
 
@@ -172,24 +174,41 @@ class RQ4_RQ8_Analyzer:
         print("  RQ4.3: Fast kernels RT vs BE scenario")
         df = self.load_csv('rq4_3_fast_kernels_rt_be.csv')
         if df is not None:
-            df['config'] = 'Unknown'
+            # Detect configuration from data characteristics    
+            def detect_config(row):
+                type_detail = str(row.get('type_detail', ''))
+                kernels_detail = str(row.get('kernels_per_stream_detail', ''))
+                per_priority = str(row.get('per_priority_p99', ''))
 
-            mask_only_fast = (df.get('type_detail', '') == '') & (df.get('kernels_per_stream_detail', '').str.count(',') == 0)
-            df.loc[mask_only_fast, 'config'] = 'Only Fast'
+                # Only fast: uniform type, uniform kernels
+                if type_detail == 'uniform' and kernels_detail == 'uniform':
+                    return 'Only Fast'
+                # Fast+Slow with priority: has per_priority_p99 data (colon-separated)
+                elif ':' in per_priority and per_priority != 'nan':
+                    return 'Fast+Slow, With Priority'
+                # Fast+Slow without priority: has mixed workload but no priority data
+                elif ':' in type_detail or ':' in kernels_detail:
+                    return 'Fast+Slow, No Priority'
+                else:
+                    return 'Unknown'
 
-            num_runs = 3
-            total_rows = len(df)
+            df['config'] = df.apply(detect_config, axis=1)
 
-            if total_rows >= num_runs * 3:
-                df.iloc[0:num_runs, df.columns.get_loc('config')] = 'Only Fast'
-                df.iloc[num_runs:2*num_runs, df.columns.get_loc('config')] = 'Fast+Slow, No Priority'
-                df.iloc[2*num_runs:3*num_runs, df.columns.get_loc('config')] = 'Fast+Slow, With Priority'
+            # Validate we have all expected configs
+            configs_found = df['config'].unique()
+            expected_configs = ['Only Fast', 'Fast+Slow, No Priority', 'Fast+Slow, With Priority']
+            missing_configs = [c for c in expected_configs if c not in configs_found]
+
+            if missing_configs:
+                print(f"    ⚠️  WARNING: Missing configurations: {missing_configs}")
+                print(f"    Found configs: {configs_found.tolist()}")
+                print(f"    This experiment may need to be re-run with mixed fast/slow workloads")
 
             grouped = df.groupby('config').agg({
-                'e2e_p99': ['mean', 'std']
+                'e2e_p99': ['mean', 'std', 'count']
             }).reset_index()
 
-            grouped.columns = ['config', 'e2e_p99_mean', 'e2e_p99_std']
+            grouped.columns = ['config', 'e2e_p99_mean', 'e2e_p99_std', 'sample_size']
 
             config_order = ['Only Fast', 'Fast+Slow, No Priority', 'Fast+Slow, With Priority']
             grouped['config'] = pd.Categorical(grouped['config'], categories=config_order, ordered=True)
@@ -197,46 +216,93 @@ class RQ4_RQ8_Analyzer:
             # Filter out Unknown/NaN configs
             grouped = grouped[grouped['config'].isin(config_order)]
 
-            x = np.arange(len(grouped))
-            ax3.bar(x, grouped['e2e_p99_mean'], yerr=grouped['e2e_p99_std'],
-                    capsize=5, color=['green', 'orange', 'blue'], alpha=0.7)
+            if len(grouped) > 0:
+                x = np.arange(len(grouped))
+                colors = ['green', 'orange', 'blue'][:len(grouped)]
+                ax3.bar(x, grouped['e2e_p99_mean'], yerr=grouped['e2e_p99_std'],
+                        capsize=5, color=colors, alpha=0.7)
 
-            ax3.set_xticks(x)
-            ax3.set_xticklabels(grouped['config'])
-            ax3.set_ylabel('Fast Kernels E2E P99 (ms)')
-            ax3.set_title('(c) Fast Kernel Latency in RT vs BE Scenario')
-            ax3.grid(True, alpha=0.3, axis='y')
+                ax3.set_xticks(x)
+                ax3.set_xticklabels(grouped['config'], rotation=15, ha='right')
+                ax3.set_ylabel('Fast Kernels E2E P99 (ms)')
+                ax3.set_title('(c) Fast Kernel Latency in RT vs BE Scenario')
+                ax3.grid(True, alpha=0.3, axis='y')
+
+                # Add sample size annotations
+                for i, row in enumerate(grouped.itertuples()):
+                    ax3.text(i, row.e2e_p99_mean, f'n={int(row.sample_size)}',
+                            ha='center', va='bottom', fontsize=9)
+            else:
+                ax3.text(0.5, 0.5, 'No valid data\nfor this analysis',
+                        ha='center', va='center', transform=ax3.transAxes,
+                        fontsize=12, color='red')
+                ax3.set_title('(c) Fast Kernel Latency in RT vs BE Scenario')
 
         # RQ4.4: Jain fairness vs priority pattern
         print("  RQ4.4: Jain fairness vs priority pattern")
         df = self.load_csv('rq4_4_fairness_vs_priority.csv')
         if df is not None:
-            num_runs = 3
+            # Detect pattern from priority levels
+            def count_priority_levels(val):
+                if pd.isna(val):
+                    return 0
+                parts = str(val).split(':')
+                return len(parts)
+
+            df['num_priority_levels'] = df['per_priority_p99'].apply(count_priority_levels)
+
+            num_runs = 10  # Each pattern has 10 runs
             patterns = ['All Equal', '1H-7L', '2H-6L', '4H-4L', 'Multi-Level']
 
             df['pattern'] = 'Unknown'
             total_rows = len(df)
 
-            for i, pattern in enumerate(patterns):
-                start = i * num_runs
-                end = start + num_runs
-                if end <= total_rows:
-                    df.iloc[start:end, df.columns.get_loc('pattern')] = pattern
+            # Assignment based on data structure:
+            # Rows 0-9: 1 level (All Equal)
+            # Rows 10-39: 2 levels (1H-7L, 2H-6L, 4H-4L) - 10 rows each
+            # Rows 40-49: 5 levels (Multi-Level)
+
+            if total_rows >= num_runs:
+                df.iloc[0:num_runs, df.columns.get_loc('pattern')] = 'All Equal'
+            if total_rows >= 2 * num_runs:
+                df.iloc[num_runs:2*num_runs, df.columns.get_loc('pattern')] = '1H-7L'
+            if total_rows >= 3 * num_runs:
+                df.iloc[2*num_runs:3*num_runs, df.columns.get_loc('pattern')] = '2H-6L'
+            if total_rows >= 4 * num_runs:
+                df.iloc[3*num_runs:4*num_runs, df.columns.get_loc('pattern')] = '4H-4L'
+            if total_rows >= 5 * num_runs:
+                df.iloc[4*num_runs:5*num_runs, df.columns.get_loc('pattern')] = 'Multi-Level'
+
+            # Validate assignments match data
+            validation_issues = []
+            for pattern, expected_levels in [('All Equal', 1), ('Multi-Level', 5)]:
+                subset = df[df['pattern'] == pattern]
+                if len(subset) > 0:
+                    actual_levels = subset['num_priority_levels'].unique()
+                    if len(actual_levels) == 1 and actual_levels[0] != expected_levels:
+                        validation_issues.append(f"{pattern}: expected {expected_levels} levels, got {actual_levels[0]}")
+
+            if validation_issues:
+                print(f"    ⚠️  WARNING: Pattern validation issues: {validation_issues}")
 
             grouped = df.groupby('pattern').agg({
-                'jains_index': ['mean', 'std']
+                'jains_index': ['mean', 'std', 'count']
             }).reset_index()
 
-            grouped.columns = ['pattern', 'jains_index_mean', 'jains_index_std']
+            grouped.columns = ['pattern', 'jains_index_mean', 'jains_index_std', 'sample_size']
 
             grouped['pattern'] = pd.Categorical(grouped['pattern'], categories=patterns, ordered=True)
             grouped = grouped.sort_values('pattern')
             # Filter out Unknown/NaN patterns
             grouped = grouped[grouped['pattern'].isin(patterns)]
 
+            if len(grouped) < len(patterns):
+                print(f"    ⚠️  WARNING: Expected {len(patterns)} patterns, found {len(grouped)}")
+                print(f"    Missing patterns may indicate incomplete experiment runs")
+
             x = np.arange(len(grouped))
             ax4.bar(x, grouped['jains_index_mean'], yerr=grouped['jains_index_std'],
-                    capsize=5, alpha=0.7)
+                    capsize=5, alpha=0.7, color='steelblue')
 
             ax4.set_xticks(x)
             ax4.set_xticklabels(grouped['pattern'], rotation=15, ha='right')
@@ -265,18 +331,6 @@ class RQ4_RQ8_Analyzer:
         print("  RQ5.1: Jain index vs imbalance")
         df = self.load_csv('rq5_1_jain_vs_imbalance.csv')
         if df is not None:
-            num_runs = 3
-            patterns = ['Balanced', 'Mild', 'Moderate', 'Severe']
-
-            df['pattern'] = 'Unknown'
-            total_rows = len(df)
-
-            for i, pattern in enumerate(patterns):
-                start = i * num_runs
-                end = start + num_runs
-                if end <= total_rows:
-                    df.iloc[start:end, df.columns.get_loc('pattern')] = pattern
-
             def calc_cv(detail_str):
                 if pd.isna(detail_str) or detail_str == '':
                     return 0
@@ -292,26 +346,60 @@ class RQ4_RQ8_Analyzer:
 
             df['imbalance_cv'] = df.get('kernels_per_stream_detail', '').apply(calc_cv)
 
+            # Detect pattern names from actual data based on CV ranges
+            # Actual patterns: 20:20:20:20 (CV=0.0), 10:20:30:40 (CV=0.447),
+            #                  5:15:30:50 (CV=0.678), 5:10:40:80 (CV=0.885)
+            def classify_pattern(detail_str, cv):
+                if cv < 0.05:
+                    return 'Balanced'
+                elif cv < 0.55:  # 10:20:30:40 gives CV ≈ 0.447
+                    return 'Mild'
+                elif cv < 0.75:  # 5:15:30:50 gives CV ≈ 0.678
+                    return 'Moderate'
+                else:  # 5:10:40:80 gives CV ≈ 0.885
+                    return 'Severe'
+
+            df['pattern'] = df.apply(lambda row: classify_pattern(
+                row.get('kernels_per_stream_detail', ''), row['imbalance_cv']), axis=1)
+
             grouped = df.groupby('pattern').agg({
-                'jains_index': ['mean', 'std'],
+                'jains_index': ['mean', 'std', 'count'],
                 'imbalance_cv': 'mean'
             }).reset_index()
 
-            grouped.columns = ['pattern', 'jains_index_mean', 'jains_index_std', 'imbalance_cv']
+            grouped.columns = ['pattern', 'jains_index_mean', 'jains_index_std', 'sample_size', 'imbalance_cv']
 
+            # Only expect patterns that exist in the data
+            expected_patterns = ['Balanced', 'Moderate', 'Severe']
+            actual_patterns = grouped['pattern'].unique().tolist()
+
+            # Use all actual patterns found, maintaining order
+            patterns = expected_patterns
             grouped['pattern'] = pd.Categorical(grouped['pattern'], categories=patterns, ordered=True)
             grouped = grouped.sort_values('pattern')
-            # Filter out Unknown/NaN patterns
-            grouped = grouped[grouped['pattern'].isin(patterns)]
+
+            missing = [p for p in expected_patterns if p not in actual_patterns]
+            if missing:
+                print(f"    Note: Patterns not found in data: {missing}")
 
             ax1.plot(grouped['imbalance_cv'], grouped['jains_index_mean'],
-                     marker='o', linewidth=2, markersize=10)
+                     marker='o', linewidth=2, markersize=10, color='steelblue')
             ax1.errorbar(grouped['imbalance_cv'], grouped['jains_index_mean'],
-                         yerr=grouped['jains_index_std'], fmt='none', capsize=5)
+                         yerr=grouped['jains_index_std'], fmt='none', capsize=5, color='steelblue')
 
-            for i, row in grouped.iterrows():
-                ax1.annotate(row['pattern'], (row['imbalance_cv'], row['jains_index_mean']),
-                             xytext=(5, 5), textcoords='offset points')
+            # Add annotations with smart positioning to avoid overlap
+            for idx, row in grouped.iterrows():
+                # Offset based on position to avoid overlap
+                y_offset = 10 + (idx * 3) if idx < 2 else -15 - ((idx-2) * 3)
+                x_offset = 8
+                ax1.annotate(f"{row['pattern']}\n(n={int(row['sample_size'])})",
+                             (row['imbalance_cv'], row['jains_index_mean']),
+                             xytext=(x_offset, y_offset), textcoords='offset points',
+                             fontsize=9, ha='left',
+                             bbox=dict(boxstyle='round,pad=0.3', facecolor='white',
+                                      edgecolor='steelblue', alpha=0.7),
+                             arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0',
+                                           color='steelblue', lw=1))
 
             ax1.set_xlabel('Load Imbalance (CV of kernels per stream)')
             ax1.set_ylabel("Jain's Fairness Index")
@@ -348,21 +436,32 @@ class RQ4_RQ8_Analyzer:
             # Homogeneous if type_detail is empty or "uniform"
             df['is_hetero'] = df.get('type_detail', '').apply(lambda x: ':' in str(x))
 
+            # Check data coverage
+            homo_streams = set(df[~df['is_hetero']]['streams'].unique())
+            hetero_streams = set(df[df['is_hetero']]['streams'].unique())
+
+            print(f"    Homogeneous workloads at stream counts: {sorted(homo_streams)}")
+            print(f"    Heterogeneous workloads at stream counts: {sorted(hetero_streams)}")
+
+            if len(hetero_streams) < 3:
+                print(f"    ⚠️  WARNING: Limited heterogeneous data (only {len(hetero_streams)} stream counts)")
+                print(f"    Consider running heterogeneous workloads at more stream counts for better comparison")
+
             grouped = df.groupby(['streams', 'is_hetero']).agg({
-                'throughput': ['mean', 'std'],
+                'throughput': ['mean', 'std', 'count'],
                 'concurrent_rate': ['mean', 'std']
             }).reset_index()
 
-            grouped.columns = ['streams', 'is_hetero', 'throughput_mean', 'throughput_std',
+            grouped.columns = ['streams', 'is_hetero', 'throughput_mean', 'throughput_std', 'sample_size',
                                'concurrent_rate_mean', 'concurrent_rate_std']
 
             # Plot throughput on ax3
             for is_hetero in [False, True]:
                 data = grouped[grouped['is_hetero'] == is_hetero]
                 if len(data) > 0:
-                    label = 'Heterogeneous' if is_hetero else 'Homogeneous'
+                    label = f'Heterogeneous (n={len(data)})' if is_hetero else f'Homogeneous (n={len(data)})'
                     ax3.plot(data['streams'], data['throughput_mean'],
-                             marker='o', label=label, linewidth=2)
+                             marker='o', label=label, linewidth=2, markersize=8)
                     ax3.fill_between(data['streams'],
                                      data['throughput_mean'] - data['throughput_std'],
                                      data['throughput_mean'] + data['throughput_std'],
@@ -375,6 +474,13 @@ class RQ4_RQ8_Analyzer:
             ax3.grid(True, alpha=0.3)
             ax3.set_xscale('log', base=2)
 
+            # Add note if data is limited
+            if len(hetero_streams) < 3:
+                ax3.text(0.5, 0.95, '⚠ Limited heterogeneous data coverage',
+                        ha='center', va='top', transform=ax3.transAxes,
+                        fontsize=9, style='italic', bbox=dict(boxstyle='round',
+                        facecolor='yellow', alpha=0.5))
+
         fig.suptitle('RQ5: Heterogeneity & Load Imbalance', fontsize=16, fontweight='bold')
         self.save_figure('rq5_heterogeneity')
 
@@ -383,7 +489,13 @@ class RQ4_RQ8_Analyzer:
     # ========================================================================
 
     def analyze_rq6(self, sub_rqs: Optional[List[str]] = None):
-        """Analyze RQ6: Arrival pattern and jitter effects - combined figure."""
+        """
+        Analyze RQ6: Arrival pattern and jitter effects - combined figure.
+
+        NOTE: Jitter (randomized arrival times) REDUCES concurrent execution rate compared
+        to periodic arrivals. This is EXPECTED behavior - periodic arrivals create bursts
+        that enable more kernels to overlap, while random arrivals spread out submissions.
+        """
         print("\n=== Analyzing RQ6: Arrival Pattern & Jitter ===")
 
         # Create a 1x2 subplot figure
@@ -393,7 +505,11 @@ class RQ4_RQ8_Analyzer:
         df = self.load_csv('rq6_jitter_effects.csv')
         if df is not None:
             # Use actual seed column if available
+            # seed=0 means periodic (no jitter), seed!=0 means random (with jitter)
             df['has_jitter'] = df.get('seed', pd.Series([0]*len(df))) != 0
+
+            print(f"    Data summary: {len(df[~df['has_jitter']])} periodic runs, "
+                  f"{len(df[df['has_jitter']])} jittered runs")
 
             # Use launch_freq if available, otherwise estimate from throughput
             if 'launch_freq' in df.columns:
@@ -481,14 +597,20 @@ class RQ4_RQ8_Analyzer:
 
         df = self.load_csv('rq7_working_set_vs_l2.csv')
         if df is not None:
-            # Get L2 size from first row that has it, or assume 6MB
-            l2_size_mb = 6.0  # Default
+            # Get L2 size from first row that has it, or use RTX 5090 default
+            l2_size_mb = 96.0  # RTX 5090 L2 cache size
             if 'l2_cache_mb' in df.columns:
                 l2_vals = df['l2_cache_mb'].dropna()
                 if len(l2_vals) > 0:
                     l2_size_mb = l2_vals.iloc[0]
+                    print(f"    Using L2 cache size from CSV: {l2_size_mb:.2f} MB")
+            else:
+                print(f"    Using detected L2 cache size: {l2_size_mb:.2f} MB")
 
             df['ws_l2_ratio'] = df['working_set_mb'] / l2_size_mb
+
+            print(f"    Working set range: {df['working_set_mb'].min():.1f} - {df['working_set_mb'].max():.1f} MB")
+            print(f"    WS/L2 ratio range: {df['ws_l2_ratio'].min():.3f} - {df['ws_l2_ratio'].max():.3f}")
 
             grouped = df.groupby(['ws_l2_ratio', 'type']).agg({
                 'throughput': ['mean', 'std'],
@@ -560,25 +682,21 @@ class RQ4_RQ8_Analyzer:
         if df is not None and len(df) > 0:
             print("  RQ8.1: Fairness and throughput vs process configuration")
 
-            # Parse configuration from data
-            # We need to infer the configuration from streams count
-            # Single process: 32 streams
-            # 4 processes: 8 streams each
-            # 8 processes: 4 streams each
-            # 16 processes: 2 streams each
+            # Parse configuration from kernels_per_stream_detail
+            # Multi-process runs have format: "4proc_x_8streams"
+            # Single-process has "uniform"
 
             def infer_config(row):
-                s = row['streams']
-                if s == 32:
-                    return '1×32'
-                elif s == 8:
-                    return '4×8'
-                elif s == 4:
-                    return '8×4'
-                elif s == 2:
-                    return '16×2'
+                detail = str(row.get('kernels_per_stream_detail', ''))
+
+                # Check if this is a multiprocess run
+                if 'proc_x' in detail:
+                    # Format: "4proc_x_8streams" -> "4×8"
+                    parts = detail.replace('proc_x_', '×').replace('streams', '')
+                    return parts
                 else:
-                    return f'{s} streams'
+                    # Single process: uniform with 32 streams
+                    return '1×32'
 
             df['config'] = df.apply(infer_config, axis=1)
 

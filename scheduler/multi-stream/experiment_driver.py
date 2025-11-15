@@ -842,15 +842,16 @@ class ExperimentDriver:
         num_streams = 8
 
         # Vary workload_size to cover < L2, ~ L2, > L2
-        # Typical L2: 4-6 MB
+        # RTX 5090 L2: 96 MB
         # working_set = streams * size * sizeof(float) / 1MB
-        # For 8 streams: size=131072 -> ~4MB, size=524288 -> ~16MB, etc.
+        # For 8 streams with sizeof(float)=4: size * 8 * 4 / 1048576 = size * 32 / 1048576 MB
         workload_sizes = [
-            65536,    # ~2 MB total (< L2)
-            131072,   # ~4 MB total (~ L2)
-            262144,   # ~8 MB total (> L2)
-            524288,   # ~16 MB total (>> L2)
-            1048576,  # ~32 MB total (>>> L2)
+            1048576,    # 32 MB total (< L2, ~0.33x)
+            2097152,    # 64 MB total (< L2, ~0.67x)
+            3145728,    # 96 MB total (≈ L2, ~1.0x)
+            4194304,    # 128 MB total (> L2, ~1.33x)
+            6291456,    # 192 MB total (>> L2, ~2.0x)
+            8388608,    # 256 MB total (>>> L2, ~2.67x)
         ]
 
         kernel_types = ['memory', 'mixed', 'compute']
@@ -896,12 +897,14 @@ class ExperimentDriver:
         - Mode A: 1 process with 32 streams
         - Mode B: 4 processes with 8 streams each
         - Mode C: 8 processes with 4 streams each
+        - Mode D: 16 processes with 2 streams each
+
+        This uses concurrent process execution to properly test multi-process GPU scheduling.
         """
         print("\n=== Running RQ8 Experiments: Multi-Process vs Single-Process ===")
 
-        # Note: Since we can't easily run multiple processes concurrently from Python
-        # in a controlled way, we'll simulate this by running them sequentially
-        # and then the analyzer can combine the results
+        import multiprocessing
+        import glob
 
         total_streams = 32
         configurations = [
@@ -939,41 +942,160 @@ class ExperimentDriver:
                             csv_lines.extend([l for l in lines if not l.startswith('streams,')])
 
                 else:
-                    # For multiple processes, run them sequentially but save raw CSVs
-                    # The analyzer will need to understand this is multi-process
-                    process_outputs = []
+                    # For multiple processes, run them CONCURRENTLY using subprocess.Popen
+                    print(f"    Launching {num_processes} concurrent processes...")
+
+                    # Start all processes concurrently
+                    processes = []
+                    raw_files = []
 
                     for proc_id in range(num_processes):
                         raw_csv_file = str(self.output_dir / f'rq8_raw_{config_name}_run{run_idx}_proc{proc_id}.csv')
+                        raw_files.append(raw_csv_file)
 
-                        args = [
+                        cmd = [
+                            self.bench_path,
                             '--streams', str(streams_per_process),
                             '--kernels', '30',
                             '--size', '1048576',
                             '--type', 'mixed',
                             '--csv-output', raw_csv_file,
+                            '--no-header',  # Skip header in raw files
                         ]
 
-                        csv_output = self.run_benchmark(
-                            args,
-                            first_run=(len(csv_lines) == 0 and proc_id == 0)
+                        proc = subprocess.Popen(
+                            cmd,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL
                         )
+                        processes.append(proc)
 
-                        if csv_output:
-                            process_outputs.append(csv_output)
+                    # Wait for all processes to complete
+                    print(f"    Waiting for {num_processes} processes to complete...")
+                    results = []
+                    for proc_id, (proc, raw_file) in enumerate(zip(processes, raw_files)):
+                        returncode = proc.wait(timeout=120)
+                        success = (returncode == 0)
+                        results.append((proc_id, success, raw_file))
 
-                        time.sleep(0.3)  # Small delay between processes
+                    # Check results
+                    successful = sum(1 for _, success, _ in results if success)
+                    print(f"    Completed: {successful}/{num_processes} processes succeeded")
 
-                    # For aggregated output, we'll just take the first process's aggregated metrics
-                    # The analyzer will do proper multi-process analysis from raw CSVs
-                    if process_outputs:
-                        lines = process_outputs[0].split('\n')
-                        if len(csv_lines) == 0:
-                            csv_lines.extend(lines)
-                        else:
-                            csv_lines.extend([l for l in lines if not l.startswith('streams,')])
+                    # Aggregate metrics from all raw CSVs for this run
+                    raw_files = [f for _, success, f in results if success and f]
+                    if raw_files:
+                        # Read and combine all per-kernel data
+                        all_timings = []
+                        for proc_id, raw_file in enumerate(raw_files):
+                            if os.path.exists(raw_file):
+                                df = pd.read_csv(raw_file)
+                                # Assign global stream IDs: each process's streams get unique IDs
+                                df['global_stream_id'] = df['stream_id'] + proc_id * streams_per_process
+                                all_timings.append(df)
 
-                time.sleep(0.5)
+                        if all_timings:
+                            # Combine all timings
+                            combined_df = pd.concat(all_timings, ignore_index=True)
+
+                            # Compute aggregate metrics across all processes
+                            total_kernels = len(combined_df)
+                            # Use actual number of successful processes, not nominal count
+                            effective_procs = len(raw_files)
+                            total_streams = effective_procs * streams_per_process
+
+                            # Calculate throughput: total kernels / total wall time
+                            global_start = combined_df['start_time_ms'].min()
+                            global_end = combined_df['end_time_ms'].max()
+                            wall_time_sec = (global_end - global_start) / 1000.0
+                            throughput = total_kernels / wall_time_sec if wall_time_sec > 0 else 0
+
+                            # Calculate P99 latency
+                            e2e_p99 = combined_df['e2e_latency_ms'].quantile(0.99)
+
+                            # Calculate Jain's fairness index per stream (using global stream IDs)
+                            stream_throughputs = []
+                            for stream_id in combined_df['global_stream_id'].unique():
+                                stream_df = combined_df[combined_df['global_stream_id'] == stream_id]
+                                stream_start = stream_df['start_time_ms'].min()
+                                stream_end = stream_df['end_time_ms'].max()
+                                stream_time = (stream_end - stream_start) / 1000.0
+                                stream_tput = len(stream_df) / stream_time if stream_time > 0 else 0
+                                stream_throughputs.append(stream_tput)
+
+                            # Jain's index = (sum x)^2 / (n * sum x^2)
+                            if stream_throughputs:
+                                sum_tput = sum(stream_throughputs)
+                                sum_tput_sq = sum(x*x for x in stream_throughputs)
+                                n = len(stream_throughputs)
+                                jains_index = (sum_tput * sum_tput) / (n * sum_tput_sq) if sum_tput_sq > 0 else 1.0
+                            else:
+                                jains_index = 1.0
+
+                            # Compute GPU utilization (simplified: fraction of time with active kernels)
+                            events = []
+                            for _, row in combined_df.iterrows():
+                                events.append((row['start_time_ms'], 1))
+                                events.append((row['end_time_ms'], -1))
+                            events.sort()
+
+                            time_with_kernels = 0
+                            current_count = 0
+                            last_time = events[0][0]
+                            for event_time, delta in events:
+                                if current_count > 0:
+                                    time_with_kernels += (event_time - last_time)
+                                current_count += delta
+                                last_time = event_time
+
+                            util = (time_with_kernels / (global_end - global_start) * 100) if (global_end - global_start) > 0 else 0
+
+                            # Create a full CSV line matching the header format
+                            # Most fields will be empty for multiprocess aggregation
+                            wall_time = (global_end - global_start)
+
+                            csv_line_parts = [
+                                str(total_streams),  # streams
+                                str(total_kernels // total_streams),  # kernels_per_stream
+                                f'{num_processes}proc_x_{streams_per_process}streams',  # kernels_per_stream_detail
+                                str(total_kernels),  # total_kernels
+                                'mixed',  # type
+                                'multiprocess',  # type_detail
+                                f'{wall_time:.2f}',  # wall_time_ms
+                                f'{wall_time:.2f}',  # e2e_wall_time_ms
+                                f'{throughput:.2f}',  # throughput
+                                '',  # svc_mean
+                                '',  # svc_p50
+                                '',  # svc_p95
+                                '',  # svc_p99
+                                '',  # e2e_mean
+                                '',  # e2e_p50
+                                '',  # e2e_p95
+                                f'{e2e_p99:.2f}',  # e2e_p99
+                                '',  # avg_queue_wait
+                                '',  # max_queue_wait
+                                '',  # concurrent_rate
+                                f'{util:.1f}',  # util
+                                f'{jains_index:.4f}',  # jains_index
+                                '',  # max_concurrent
+                                '',  # avg_concurrent
+                                '',  # inversions
+                                '',  # inversion_rate
+                                '',  # working_set_mb
+                                '',  # fits_in_l2
+                                '',  # svc_stddev
+                                '',  # grid_size
+                                '',  # block_size
+                                '',  # per_priority_avg
+                                '',  # per_priority_p50
+                                '',  # per_priority_p99
+                                '0',  # launch_freq
+                                '0',  # seed
+                            ]
+
+                            csv_lines.append(','.join(csv_line_parts))
+
+                time.sleep(1.0)  # Pause between runs
 
         self.save_csv(csv_lines, 'rq8_multiprocess.csv')
 
