@@ -26,14 +26,12 @@ struct BenchmarkConfig {
     std::vector<KernelType> kernel_types_per_stream; // For heterogeneous workloads
     std::vector<float> launch_frequency_per_stream; // Launch frequency in Hz per stream (0 = max)
     bool use_heterogeneous; // Enable different kernel types per stream
-    bool debug_trace; // Enable detailed debug trace output
     std::string csv_output_file; // CSV output file path for raw timing data
     unsigned int random_seed; // Random seed for jitter control
 
     BenchmarkConfig() : num_streams(4), num_kernels_per_stream(10),
                         workload_size(1048576), kernel_type(MIXED),
-                        use_heterogeneous(false),
-                        debug_trace(false), csv_output_file(""),
+                        use_heterogeneous(false), csv_output_file(""),
                         random_seed(0) {}
 };
 

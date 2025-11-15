@@ -99,7 +99,6 @@ void print_usage(const char *prog_name) {
     printf("  -l, --load-imbalance SPEC  Custom kernels per stream (e.g., \"5,10,20,40\")\n");
     printf("  -H, --heterogeneous SPEC   Heterogeneous kernel types (e.g., \"memory,memory,compute,compute\")\n");
     printf("  -f, --launch-frequency SPEC  Launch frequency per stream in Hz (e.g., \"100,100,20,20\", 0=max)\n");
-    printf("  -d, --debug-trace       Enable detailed debug trace output (skips regular metrics)\n");
     printf("  -o, --csv-output FILE   Write raw timing data to CSV file\n");
     printf("  -S, --seed NUM          Random seed for jitter control (default: 0)\n");
     printf("  -h, --help              Show this help message\n");
@@ -135,108 +134,6 @@ void write_timing_csv(const std::vector<KernelTiming> &timings, const BenchmarkC
     printf("Raw timing data written to: %s\n", filename.c_str());
 }
 
-// Print detailed trace of kernel execution timeline
-void print_debug_trace(const std::vector<KernelTiming> &timings, const BenchmarkConfig &config) {
-    printf("\n====================================\n");
-    printf("DEBUG TRACE: Kernel Execution Timeline\n");
-    printf("====================================\n");
-    printf("Configuration: %d streams, %d kernels per stream, priorities=%s\n\n",
-           config.num_streams, config.num_kernels_per_stream,
-           config.priorities_per_stream.empty() ? "disabled" : "enabled");
-
-    printf("%-8s %-8s %-9s %-12s %-12s %-12s %-12s %-12s %-12s\n",
-           "Stream", "Kernel", "Priority", "Enqueue(ms)", "Start(ms)", "End(ms)",
-           "QueueWait", "Exec", "E2E");
-    printf("------------------------------------------------------------------------");
-    printf("------------------------------------------------------------\n");
-
-    // Sort timings by enqueue time to show launch order
-    std::vector<KernelTiming> sorted_timings = timings;
-    std::sort(sorted_timings.begin(), sorted_timings.end(),
-              [](const KernelTiming& a, const KernelTiming& b) {
-                  return a.enqueue_time_ms < b.enqueue_time_ms;
-              });
-
-    for (const auto &t : sorted_timings) {
-        printf("%-8d %-8d %-9d %-12.3f %-12.3f %-12.3f %-12.3f %-12.3f %-12.3f\n",
-               t.stream_id, t.kernel_id, t.priority,
-               t.enqueue_time_ms, t.start_time_ms, t.end_time_ms,
-               t.launch_latency_ms, t.duration_ms, t.e2e_latency_ms);
-    }
-
-    printf("\n");
-
-    // Analyze scheduling behavior
-    if (!config.priorities_per_stream.empty()) {
-        printf("Priority Scheduling Analysis:\n");
-
-        // Count inversions where high-priority started after low-priority
-        int inversions = 0;
-        for (size_t i = 0; i < timings.size(); i++) {
-            for (size_t j = i + 1; j < timings.size(); j++) {
-                if (timings[i].priority < timings[j].priority &&
-                    timings[i].start_time_ms > timings[j].start_time_ms &&
-                    timings[j].end_time_ms > timings[i].start_time_ms) {
-                    inversions++;
-                    printf("  Inversion: Stream %d Kernel %d (pri=%d) started at %.3fms after Stream %d Kernel %d (pri=%d) at %.3fms\n",
-                           timings[i].stream_id, timings[i].kernel_id, timings[i].priority, timings[i].start_time_ms,
-                           timings[j].stream_id, timings[j].kernel_id, timings[j].priority, timings[j].start_time_ms);
-                }
-            }
-        }
-
-        printf("  Total priority inversions: %d\n", inversions);
-
-        // Show per-priority statistics
-        std::map<int, std::vector<float>> priority_e2e;
-        for (const auto &t : timings) {
-            priority_e2e[t.priority].push_back(t.e2e_latency_ms);
-        }
-
-        printf("\nPer-Priority E2E Latency:\n");
-        for (const auto &pair : priority_e2e) {
-            // Sort for percentile calculation
-            std::vector<float> sorted_lats = pair.second;
-            std::sort(sorted_lats.begin(), sorted_lats.end());
-
-            float sum = 0.0f;
-            for (float lat : sorted_lats) sum += lat;
-            float avg = sum / sorted_lats.size();
-
-            float p50 = sorted_lats[sorted_lats.size() / 2];
-            float p99 = sorted_lats[(sorted_lats.size() * 99) / 100];
-
-            printf("  Priority %d: avg=%.3fms, P50=%.3fms, P99=%.3fms (n=%zu)\n",
-                   pair.first, avg, p50, p99, sorted_lats.size());
-        }
-
-        // Show per-stream statistics
-        std::map<int, std::vector<float>> stream_e2e;
-        for (const auto &t : timings) {
-            stream_e2e[t.stream_id].push_back(t.e2e_latency_ms);
-        }
-
-        printf("\nPer-Stream E2E Latency:\n");
-        for (const auto &pair : stream_e2e) {
-            // Sort for percentile calculation
-            std::vector<float> sorted_lats = pair.second;
-            std::sort(sorted_lats.begin(), sorted_lats.end());
-
-            float sum = 0.0f;
-            for (float lat : sorted_lats) sum += lat;
-            float avg = sum / sorted_lats.size();
-
-            float p50 = sorted_lats[sorted_lats.size() / 2];
-            float p99 = sorted_lats[(sorted_lats.size() * 99) / 100];
-
-            printf("  Stream %d: avg=%.3fms, P50=%.3fms, P99=%.3fms (n=%zu)\n",
-                   pair.first, avg, p50, p99, sorted_lats.size());
-        }
-    }
-
-    printf("====================================\n\n");
-}
-
 int main(int argc, char **argv) {
     BenchmarkConfig config;
 
@@ -250,7 +147,6 @@ int main(int argc, char **argv) {
         {"load-imbalance", required_argument, 0, 'l'},
         {"heterogeneous", required_argument, 0, 'H'},
         {"launch-frequency", required_argument, 0, 'f'},
-        {"debug-trace", no_argument, 0, 'd'},
         {"csv-output", required_argument, 0, 'o'},
         {"seed", required_argument, 0, 'S'},
         {"help", no_argument, 0, 'h'},
@@ -258,7 +154,7 @@ int main(int argc, char **argv) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "s:k:w:t:p:l:H:f:do:S:h", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:k:w:t:p:l:H:f:o:S:h", long_options, NULL)) != -1) {
         switch (opt) {
             case 's':
                 config.num_streams = atoi(optarg);
@@ -344,9 +240,6 @@ int main(int argc, char **argv) {
                         config.num_streams = config.launch_frequency_per_stream.size();
                     }
                 }
-                break;
-            case 'd':
-                config.debug_trace = true;
                 break;
             case 'o':
                 config.csv_output_file = optarg;
@@ -601,25 +494,19 @@ int main(int argc, char **argv) {
         }
     }
 
-    // Calculate timings
-    cudaEvent_t first_event = *start_events[0];
+    // Calculate timings - use global_start as unified reference for all timestamps
     for (size_t i = 0; i < start_events.size(); i++) {
         CUDA_CHECK(cudaEventElapsedTime(&timings[i].start_time_ms,
-                                        first_event, *start_events[i]));
+                                        *global_start, *start_events[i]));
         CUDA_CHECK(cudaEventElapsedTime(&timings[i].end_time_ms,
-                                        first_event, *end_events[i]));
+                                        *global_start, *end_events[i]));
         timings[i].duration_ms = timings[i].end_time_ms - timings[i].start_time_ms;
-        timings[i].launch_latency_ms = timings[i].start_time_ms - timings[i].enqueue_time_ms;
-        // E2E latency = duration + queue wait time (launch_latency is negative)
-        timings[i].e2e_latency_ms = timings[i].duration_ms - timings[i].launch_latency_ms;
+        timings[i].launch_latency_ms = timings[i].start_time_ms - timings[i].enqueue_time_ms;  // Queue wait time (>=0)
+        timings[i].e2e_latency_ms = timings[i].end_time_ms - timings[i].enqueue_time_ms;       // End-to-end latency
     }
 
-    // Output results based on mode
-    if (config.debug_trace) {
-        print_debug_trace(timings, config);
-    } else {
-        compute_metrics(timings, config, grid.x, block.x);
-    }
+    // Output metrics
+    compute_metrics(timings, config, grid.x, block.x);
 
     // Write CSV output if requested
     if (!config.csv_output_file.empty()) {

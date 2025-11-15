@@ -23,42 +23,54 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
     float global_end = timings[0].end_time_ms;
     float total_kernel_time = 0.0f;
 
-    std::vector<float> durations;
+    std::vector<float> svc_times;      // Service time (execution time only)
+    std::vector<float> e2e_times;      // End-to-end latency (including queue wait)
+    std::vector<float> queue_waits;    // Queue waiting time
+
     for (const auto &t : timings) {
         global_start = fminf(global_start, t.start_time_ms);
         global_end = fmaxf(global_end, t.end_time_ms);
         total_kernel_time += t.duration_ms;
-        durations.push_back(t.duration_ms);
+
+        svc_times.push_back(t.duration_ms);
+        e2e_times.push_back(t.e2e_latency_ms);
+        queue_waits.push_back(t.launch_latency_ms);
     }
 
     float total_wall_time = global_end - global_start;
     int total_kernels = timings.size();
 
-    // Concurrent execution rate
-    float ideal_parallel_time = total_kernel_time / config.num_streams;
-    float concurrent_rate = (ideal_parallel_time / total_wall_time) * 100.0f;
-    if (concurrent_rate > 100.0f) concurrent_rate = 100.0f;
+    // Average service time (execution time only)
+    float avg_service_time = total_kernel_time / total_kernels;
 
-    // Average latency
-    float avg_latency = total_kernel_time / total_kernels;
+    // Average e2e latency
+    float total_e2e = 0.0f;
+    for (float e : e2e_times) total_e2e += e;
+    float avg_e2e_latency = total_e2e / total_kernels;
 
     // Throughput
     float throughput = total_kernels / (total_wall_time / 1000.0f); // kernels/sec
 
-    // Load imbalance (standard deviation)
-    float mean_duration = avg_latency;
+    // Load imbalance (standard deviation of service time)
     float variance = 0.0f;
-    for (float d : durations) {
-        variance += (d - mean_duration) * (d - mean_duration);
+    for (float d : svc_times) {
+        variance += (d - avg_service_time) * (d - avg_service_time);
     }
-    float stddev = sqrtf(variance / durations.size());
+    float stddev = sqrtf(variance / svc_times.size());
 
-    // Percentile latencies (P50, P95, P99)
-    std::vector<float> sorted_durations = durations;
-    std::sort(sorted_durations.begin(), sorted_durations.end());
-    float p50 = sorted_durations[sorted_durations.size() * 50 / 100];
-    float p95 = sorted_durations[sorted_durations.size() * 95 / 100];
-    float p99 = sorted_durations[sorted_durations.size() * 99 / 100];
+    // Service time percentiles (P50, P95, P99)
+    std::vector<float> sorted_svc = svc_times;
+    std::sort(sorted_svc.begin(), sorted_svc.end());
+    float svc_p50 = sorted_svc[sorted_svc.size() * 50 / 100];
+    float svc_p95 = sorted_svc[sorted_svc.size() * 95 / 100];
+    float svc_p99 = sorted_svc[sorted_svc.size() * 99 / 100];
+
+    // E2E latency percentiles (P50, P95, P99)
+    std::vector<float> sorted_e2e = e2e_times;
+    std::sort(sorted_e2e.begin(), sorted_e2e.end());
+    float e2e_p50 = sorted_e2e[sorted_e2e.size() * 50 / 100];
+    float e2e_p95 = sorted_e2e[sorted_e2e.size() * 95 / 100];
+    float e2e_p99 = sorted_e2e[sorted_e2e.size() * 99 / 100];
 
     // Jain's Fairness Index: (sum xi)^2 / (n * sum xi^2)
     // Perfect fairness = 1.0, lower values indicate unfairness
@@ -84,11 +96,16 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
 
     // Priority inversion detection and per-priority latency
     int priority_inversions = 0;
+    int total_cross_priority_pairs = 0;
     std::map<int, std::vector<float>> priority_latencies; // priority -> list of e2e latencies
 
-    // Detect inversions
+    // Detect inversions and count cross-priority pairs
     for (size_t i = 0; i < timings.size(); i++) {
         for (size_t j = i + 1; j < timings.size(); j++) {
+            // Count pairs with different priorities
+            if (timings[i].priority != timings[j].priority) {
+                total_cross_priority_pairs++;
+            }
             // If higher priority (lower number) started later than lower priority
             if (timings[i].priority < timings[j].priority &&
                 timings[i].start_time_ms > timings[j].start_time_ms &&
@@ -98,17 +115,15 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
         }
     }
 
+    // Normalized inversion rate
+    float inversion_rate = (total_cross_priority_pairs > 0)
+                         ? (float)priority_inversions / total_cross_priority_pairs
+                         : 0.0f;
+
     // Collect per-priority latencies
     for (const auto &t : timings) {
         priority_latencies[t.priority].push_back(t.e2e_latency_ms);
     }
-
-    // Scheduler overhead (approximate)
-    float scheduler_overhead = ((total_wall_time - ideal_parallel_time) / total_wall_time) * 100.0f;
-    if (scheduler_overhead < 0.0f) scheduler_overhead = 0.0f;
-
-    // Estimate GPU utilization (simplified)
-    float gpu_utilization = concurrent_rate * 0.95f; // Approximate
 
     // Working set size calculation
     float working_set_mb = (config.num_streams * config.workload_size * sizeof(float)) / (1024.0f * 1024.0f);
@@ -119,7 +134,7 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
     float l2_cache_mb = prop.l2CacheSize / (1024.0f * 1024.0f);
     bool fits_in_l2 = working_set_mb <= l2_cache_mb;
 
-    // Queue depth analysis - find peak concurrent kernels
+    // Queue depth analysis - find peak concurrent kernels and compute concurrency metrics
     std::vector<std::pair<float, int>> events; // time, delta (+1 start, -1 end)
     for (const auto &t : timings) {
         events.push_back({t.start_time_ms, 1});
@@ -130,17 +145,28 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
     int current_concurrent = 0;
     int max_concurrent = 0;
     float avg_concurrent = 0.0f;
+    float time_ge1 = 0.0f;  // Time with >=1 kernels active
+    float time_ge2 = 0.0f;  // Time with >=2 kernels active
     float last_time = events[0].first;
 
     for (const auto &e : events) {
-        if (e.first > last_time) {
-            avg_concurrent += current_concurrent * (e.first - last_time);
+        float dt = e.first - last_time;
+        if (dt > 0) {
+            if (current_concurrent >= 1) time_ge1 += dt;
+            if (current_concurrent >= 2) time_ge2 += dt;
+            avg_concurrent += current_concurrent * dt;
         }
         current_concurrent += e.second;
         max_concurrent = std::max(max_concurrent, current_concurrent);
         last_time = e.first;
     }
     avg_concurrent /= total_wall_time;
+
+    // Concurrent execution rate: percentage of active time with >=2 kernels running
+    float concurrent_rate = (time_ge1 > 0) ? (time_ge2 / time_ge1 * 100.0f) : 0.0f;
+
+    // GPU utilization: percentage of time with at least 1 kernel active
+    float gpu_utilization = (time_ge1 / total_wall_time) * 100.0f;
 
     // Print results
     printf("\n====================================\n");
@@ -158,17 +184,21 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
     printf("\nResults:\n");
     printf("  Total execution time: %.2f ms\n", total_wall_time);
     printf("  Aggregate throughput: %.2f kernels/sec\n", throughput);
-    printf("\nLatency Metrics:\n");
-    printf("  Mean latency: %.2f ms\n", avg_latency);
-    printf("  P50 latency: %.2f ms\n", p50);
-    printf("  P95 latency: %.2f ms\n", p95);
-    printf("  P99 latency: %.2f ms\n", p99);
-    printf("  Avg launch latency: %.4f ms\n", avg_launch_latency);
-    printf("  Max launch latency: %.4f ms\n", max_launch_latency);
+    printf("\nService Time Metrics (execution only):\n");
+    printf("  Mean: %.2f ms\n", avg_service_time);
+    printf("  P50: %.2f ms\n", svc_p50);
+    printf("  P95: %.2f ms\n", svc_p95);
+    printf("  P99: %.2f ms\n", svc_p99);
+    printf("\nEnd-to-End Latency Metrics (including queue wait):\n");
+    printf("  Mean: %.2f ms\n", avg_e2e_latency);
+    printf("  P50: %.2f ms\n", e2e_p50);
+    printf("  P95: %.2f ms\n", e2e_p95);
+    printf("  P99: %.2f ms\n", e2e_p99);
+    printf("  Avg queue wait: %.4f ms\n", avg_launch_latency);
+    printf("  Max queue wait: %.4f ms\n", max_launch_latency);
     printf("\nScheduler Metrics:\n");
-    printf("  Concurrent execution rate: %.1f%%\n", concurrent_rate);
-    printf("  Scheduler overhead: %.1f%%\n", scheduler_overhead);
-    printf("  GPU utilization (est): %.1f%%\n", gpu_utilization);
+    printf("  Concurrent execution rate: %.1f%% (time with >=2 kernels active)\n", concurrent_rate);
+    printf("  GPU utilization: %.1f%% (time with >=1 kernel active)\n", gpu_utilization);
     printf("\nConcurrency Metrics:\n");
     printf("  Max concurrent kernels: %d\n", max_concurrent);
     printf("  Avg concurrent kernels: %.2f\n", avg_concurrent);
@@ -186,7 +216,8 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
 
     if (!priority_latencies.empty() && priority_latencies.size() > 1) {
         printf("\nPriority Metrics:\n");
-        printf("  Priority inversions detected: %d\n", priority_inversions);
+        printf("  Priority inversions: %d (%.1f%% of cross-priority pairs)\n",
+               priority_inversions, inversion_rate * 100.0f);
 
         printf("  Per-Priority E2E Latency:\n");
         for (const auto &pair : priority_latencies) {
@@ -206,18 +237,27 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
     printf("====================================\n\n");
 
     // CSV output for easy parsing
-    printf("CSV: streams,kernels_per_stream,total_kernels,type,wall_time_ms,throughput,mean_lat,p50,p95,p99,");
-    printf("concurrent_rate,overhead,util,jains_index,max_concurrent,avg_concurrent,inversions,working_set_mb,fits_in_l2,stddev,grid_size,block_size,");
+    printf("CSV_HEADER: streams,kernels_per_stream,total_kernels,type,wall_time_ms,throughput,");
+    printf("svc_mean,svc_p50,svc_p95,svc_p99,");
+    printf("e2e_mean,e2e_p50,e2e_p95,e2e_p99,");
+    printf("avg_queue_wait,max_queue_wait,");
+    printf("concurrent_rate,util,jains_index,max_concurrent,avg_concurrent,");
+    printf("inversions,inversion_rate,working_set_mb,fits_in_l2,svc_stddev,grid_size,block_size,");
     printf("per_priority_avg,per_priority_p50,per_priority_p99\n");
 
-    printf("CSV: %d,%d,%d,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f,%.1f,%.4f,%d,%.2f,%d,%.2f,%d,%.2f,%d,%d,",
+    printf("CSV: %d,%d,%d,%s,%.2f,%.2f,",
            config.num_streams, config.num_kernels_per_stream, total_kernels,
            config.kernel_type == COMPUTE ? "compute" :
            config.kernel_type == MEMORY ? "memory" :
            config.kernel_type == GEMM ? "gemm" : "mixed",
-           total_wall_time, throughput, avg_latency, p50, p95, p99,
-           concurrent_rate, scheduler_overhead, gpu_utilization,
-           jains_index, max_concurrent, avg_concurrent, priority_inversions,
+           total_wall_time, throughput);
+    printf("%.2f,%.2f,%.2f,%.2f,", avg_service_time, svc_p50, svc_p95, svc_p99);
+    printf("%.2f,%.2f,%.2f,%.2f,", avg_e2e_latency, e2e_p50, e2e_p95, e2e_p99);
+    printf("%.4f,%.4f,", avg_launch_latency, max_launch_latency);
+    printf("%.1f,%.1f,%.4f,%d,%.2f,", concurrent_rate, gpu_utilization,
+           jains_index, max_concurrent, avg_concurrent);
+    printf("%d,%.6f,%.2f,%d,%.2f,%d,%d,",
+           priority_inversions, inversion_rate,
            working_set_mb, fits_in_l2 ? 1 : 0, stddev, grid_x, block_x);
 
     // Output per-priority metrics in three separate fields
