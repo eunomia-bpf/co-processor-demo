@@ -21,6 +21,7 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
     // Find global start and end times
     float global_start = timings[0].start_time_ms;
     float global_end = timings[0].end_time_ms;
+    float global_enqueue = timings[0].enqueue_time_ms;
     float total_kernel_time = 0.0f;
 
     std::vector<float> svc_times;      // Service time (execution time only)
@@ -30,6 +31,7 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
     for (const auto &t : timings) {
         global_start = fminf(global_start, t.start_time_ms);
         global_end = fmaxf(global_end, t.end_time_ms);
+        global_enqueue = fminf(global_enqueue, t.enqueue_time_ms);
         total_kernel_time += t.duration_ms;
 
         svc_times.push_back(t.duration_ms);
@@ -37,7 +39,14 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
         queue_waits.push_back(t.launch_latency_ms);
     }
 
+    // Wall time: service window makespan (first kernel start -> last kernel end)
+    // This is appropriate for throughput and GPU utilization calculations
     float total_wall_time = global_end - global_start;
+
+    // E2E wall time: includes queue time of first kernel (first enqueue -> last end)
+    // This represents true end-to-end system response time
+    float total_e2e_wall_time = global_end - global_enqueue;
+
     int total_kernels = timings.size();
 
     // Average service time (execution time only)
@@ -174,15 +183,42 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
     printf("====================================\n");
     printf("Configuration:\n");
     printf("  Streams: %d\n", config.num_streams);
-    printf("  Kernels per stream: %d\n", config.num_kernels_per_stream);
+
+    // Print kernels per stream - handle load imbalance case
+    if (!config.kernels_per_stream_custom.empty()) {
+        printf("  Kernels per stream (load imbalance): [");
+        for (size_t i = 0; i < config.kernels_per_stream_custom.size(); i++) {
+            if (i > 0) printf(", ");
+            printf("%d", config.kernels_per_stream_custom[i]);
+        }
+        printf("]\n");
+    } else {
+        printf("  Kernels per stream: %d (uniform)\n", config.num_kernels_per_stream);
+    }
+
     printf("  Total kernels launched: %d\n", total_kernels);
     printf("  Workload size: %d elements\n", config.workload_size);
-    printf("  Kernel type: %s\n",
-           config.kernel_type == COMPUTE ? "compute" :
-           config.kernel_type == MEMORY ? "memory" :
-           config.kernel_type == GEMM ? "gemm" : "mixed");
+
+    // Print kernel type - handle heterogeneous case
+    if (config.use_heterogeneous && !config.kernel_types_per_stream.empty()) {
+        printf("  Kernel types (heterogeneous): [");
+        for (size_t i = 0; i < config.kernel_types_per_stream.size(); i++) {
+            if (i > 0) printf(", ");
+            KernelType kt = config.kernel_types_per_stream[i];
+            printf("%s", kt == COMPUTE ? "compute" :
+                        kt == MEMORY ? "memory" :
+                        kt == GEMM ? "gemm" : "mixed");
+        }
+        printf("]\n");
+    } else {
+        printf("  Kernel type: %s (uniform)\n",
+               config.kernel_type == COMPUTE ? "compute" :
+               config.kernel_type == MEMORY ? "memory" :
+               config.kernel_type == GEMM ? "gemm" : "mixed");
+    }
     printf("\nResults:\n");
-    printf("  Total execution time: %.2f ms\n", total_wall_time);
+    printf("  Service window time: %.2f ms (first start -> last end)\n", total_wall_time);
+    printf("  E2E wall time: %.2f ms (first enqueue -> last end)\n", total_e2e_wall_time);
     printf("  Aggregate throughput: %.2f kernels/sec\n", throughput);
     printf("\nService Time Metrics (execution only):\n");
     printf("  Mean: %.2f ms\n", avg_service_time);
@@ -236,27 +272,62 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
     }
     printf("====================================\n\n");
 
-    // CSV output for easy parsing
-    printf("CSV_HEADER: streams,kernels_per_stream,total_kernels,type,wall_time_ms,throughput,");
-    printf("svc_mean,svc_p50,svc_p95,svc_p99,");
-    printf("e2e_mean,e2e_p50,e2e_p95,e2e_p99,");
-    printf("avg_queue_wait,max_queue_wait,");
-    printf("concurrent_rate,util,jains_index,max_concurrent,avg_concurrent,");
-    printf("inversions,inversion_rate,working_set_mb,fits_in_l2,svc_stddev,grid_size,block_size,");
-    printf("per_priority_avg,per_priority_p50,per_priority_p99\n");
+    // CSV output for easy parsing - output to stderr for separation
+    // Header row (skip if --no-header specified)
+    if (!config.csv_no_header) {
+        fprintf(stderr, "streams,kernels_per_stream,kernels_per_stream_detail,total_kernels,type,type_detail,wall_time_ms,e2e_wall_time_ms,throughput,");
+        fprintf(stderr, "svc_mean,svc_p50,svc_p95,svc_p99,");
+        fprintf(stderr, "e2e_mean,e2e_p50,e2e_p95,e2e_p99,");
+        fprintf(stderr, "avg_queue_wait,max_queue_wait,");
+        fprintf(stderr, "concurrent_rate,util,jains_index,max_concurrent,avg_concurrent,");
+        fprintf(stderr, "inversions,inversion_rate,working_set_mb,fits_in_l2,svc_stddev,grid_size,block_size,");
+        fprintf(stderr, "per_priority_avg,per_priority_p50,per_priority_p99\n");
+    }
 
-    printf("CSV: %d,%d,%d,%s,%.2f,%.2f,",
-           config.num_streams, config.num_kernels_per_stream, total_kernels,
-           config.kernel_type == COMPUTE ? "compute" :
-           config.kernel_type == MEMORY ? "memory" :
-           config.kernel_type == GEMM ? "gemm" : "mixed",
-           total_wall_time, throughput);
-    printf("%.2f,%.2f,%.2f,%.2f,", avg_service_time, svc_p50, svc_p95, svc_p99);
-    printf("%.2f,%.2f,%.2f,%.2f,", avg_e2e_latency, e2e_p50, e2e_p95, e2e_p99);
-    printf("%.4f,%.4f,", avg_launch_latency, max_launch_latency);
-    printf("%.1f,%.1f,%.4f,%d,%.2f,", concurrent_rate, gpu_utilization,
+    // Data row
+    fprintf(stderr, "%d,%d,",
+           config.num_streams, config.num_kernels_per_stream);
+
+    // Output kernels_per_stream_detail (colon-separated for load imbalance)
+    if (!config.kernels_per_stream_custom.empty()) {
+        for (size_t i = 0; i < config.kernels_per_stream_custom.size(); i++) {
+            if (i > 0) fprintf(stderr, ":");
+            fprintf(stderr, "%d", config.kernels_per_stream_custom[i]);
+        }
+    } else {
+        fprintf(stderr, "uniform");
+    }
+    fprintf(stderr, ",");
+
+    fprintf(stderr, "%d,", total_kernels);
+
+    // Output kernel type (nominal)
+    const char *type_str = config.kernel_type == COMPUTE ? "compute" :
+                          config.kernel_type == MEMORY ? "memory" :
+                          config.kernel_type == GEMM ? "gemm" : "mixed";
+    fprintf(stderr, "%s,", type_str);
+
+    // Output type_detail (colon-separated for heterogeneous)
+    if (config.use_heterogeneous && !config.kernel_types_per_stream.empty()) {
+        for (size_t i = 0; i < config.kernel_types_per_stream.size(); i++) {
+            if (i > 0) fprintf(stderr, ":");
+            KernelType kt = config.kernel_types_per_stream[i];
+            fprintf(stderr, "%s", kt == COMPUTE ? "compute" :
+                        kt == MEMORY ? "memory" :
+                        kt == GEMM ? "gemm" : "mixed");
+        }
+    } else {
+        fprintf(stderr, "uniform");
+    }
+    fprintf(stderr, ",");
+
+    fprintf(stderr, "%.2f,%.2f,%.2f,", total_wall_time, total_e2e_wall_time, throughput);
+    fprintf(stderr, "%.2f,%.2f,%.2f,%.2f,", avg_service_time, svc_p50, svc_p95, svc_p99);
+    fprintf(stderr, "%.2f,%.2f,%.2f,%.2f,", avg_e2e_latency, e2e_p50, e2e_p95, e2e_p99);
+    fprintf(stderr, "%.4f,%.4f,", avg_launch_latency, max_launch_latency);
+    fprintf(stderr, "%.1f,%.1f,%.4f,%d,%.2f,", concurrent_rate, gpu_utilization,
            jains_index, max_concurrent, avg_concurrent);
-    printf("%d,%.6f,%.2f,%d,%.2f,%d,%d,",
+    fprintf(stderr, "%d,%.6f,%.2f,%d,%.2f,%d,%d,",
            priority_inversions, inversion_rate,
            working_set_mb, fits_in_l2 ? 1 : 0, stddev, grid_x, block_x);
 
@@ -285,34 +356,34 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
     if (!priority_avg.empty()) {
         bool first = true;
         for (const auto &pair : priority_avg) {
-            if (!first) printf(":");
-            printf("%.3f", pair.second);
+            if (!first) fprintf(stderr, ":");
+            fprintf(stderr, "%.3f", pair.second);
             first = false;
         }
     }
-    printf(",");
+    fprintf(stderr, ",");
 
     // Output p50 values
     if (!priority_p50_map.empty()) {
         bool first = true;
         for (const auto &pair : priority_p50_map) {
-            if (!first) printf(":");
-            printf("%.3f", pair.second);
+            if (!first) fprintf(stderr, ":");
+            fprintf(stderr, "%.3f", pair.second);
             first = false;
         }
     }
-    printf(",");
+    fprintf(stderr, ",");
 
     // Output p99 values
     if (!priority_p99_map.empty()) {
         bool first = true;
         for (const auto &pair : priority_p99_map) {
-            if (!first) printf(":");
-            printf("%.3f", pair.second);
+            if (!first) fprintf(stderr, ":");
+            fprintf(stderr, "%.3f", pair.second);
             first = false;
         }
     }
-    printf("\n");
+    fprintf(stderr, "\n");
 }
 
 // ============================================================================
@@ -347,10 +418,10 @@ inline int detect_priority_inversions(const std::vector<KernelTiming> &timings) 
 }
 
 /**
- * Compute per-priority-class latency statistics
+ * Compute per-priority-class E2E latency statistics
  *
- * Groups kernels by priority class and computes average latency for each.
- * This helps determine if priority affects execution performance.
+ * Groups kernels by priority class and computes average E2E latency for each.
+ * This helps determine if priority affects end-to-end performance.
  *
  * @param timings Vector of kernel timing data
  * @param config Benchmark configuration
@@ -361,32 +432,32 @@ inline void compute_priority_class_latency(const std::vector<KernelTiming> &timi
         return;
     }
 
-    // Group by priority
-    std::map<int, std::vector<float>> priority_durations;
+    // Group by priority - use e2e_latency_ms for consistency
+    std::map<int, std::vector<float>> priority_e2e_latencies;
     for (const auto &t : timings) {
-        priority_durations[t.priority].push_back(t.duration_ms);
+        priority_e2e_latencies[t.priority].push_back(t.e2e_latency_ms);
     }
 
-    printf("\nPer-Priority-Class Latency:\n");
-    for (const auto &pair : priority_durations) {
+    printf("\nPer-Priority-Class E2E Latency:\n");
+    for (const auto &pair : priority_e2e_latencies) {
         int priority = pair.first;
-        const std::vector<float> &durations = pair.second;
+        const std::vector<float> &latencies = pair.second;
 
         float sum = 0.0f;
-        for (float d : durations) {
-            sum += d;
+        for (float lat : latencies) {
+            sum += lat;
         }
-        float avg = sum / durations.size();
+        float avg = sum / latencies.size();
 
         // Compute standard deviation
         float variance = 0.0f;
-        for (float d : durations) {
-            variance += (d - avg) * (d - avg);
+        for (float lat : latencies) {
+            variance += (lat - avg) * (lat - avg);
         }
-        float stddev = sqrtf(variance / durations.size());
+        float stddev = sqrtf(variance / latencies.size());
 
         printf("  Priority %d: %.3f ms (±%.3f ms, n=%zu)\n",
-               priority, avg, stddev, durations.size());
+               priority, avg, stddev, latencies.size());
     }
 }
 
@@ -395,6 +466,10 @@ inline void compute_priority_class_latency(const std::vector<KernelTiming> &timi
  *
  * Outputs CSV format with per-kernel details including priority,
  * start/end times, duration, launch latency, and end-to-end latency.
+ *
+ * NOTE: For RQ3 priority analysis, use e2e_latency_ms (not duration_ms)
+ * to measure the impact of priority on end-to-end performance including
+ * queue wait time.
  *
  * @param timings Vector of kernel timing data
  */

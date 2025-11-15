@@ -28,11 +28,12 @@ struct BenchmarkConfig {
     bool use_heterogeneous; // Enable different kernel types per stream
     std::string csv_output_file; // CSV output file path for raw timing data
     unsigned int random_seed; // Random seed for jitter control
+    bool csv_no_header; // Skip CSV header output
 
     BenchmarkConfig() : num_streams(4), num_kernels_per_stream(10),
                         workload_size(1048576), kernel_type(MIXED),
                         use_heterogeneous(false), csv_output_file(""),
-                        random_seed(0) {}
+                        random_seed(0), csv_no_header(false) {}
 };
 
 // Timing information per kernel

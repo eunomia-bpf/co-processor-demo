@@ -101,6 +101,7 @@ void print_usage(const char *prog_name) {
     printf("  -f, --launch-frequency SPEC  Launch frequency per stream in Hz (e.g., \"100,100,20,20\", 0=max)\n");
     printf("  -o, --csv-output FILE   Write raw timing data to CSV file\n");
     printf("  -S, --seed NUM          Random seed for jitter control (default: 0)\n");
+    printf("  -n, --no-header         Skip CSV header (for batch runs)\n");
     printf("  -h, --help              Show this help message\n");
 }
 
@@ -149,12 +150,13 @@ int main(int argc, char **argv) {
         {"launch-frequency", required_argument, 0, 'f'},
         {"csv-output", required_argument, 0, 'o'},
         {"seed", required_argument, 0, 'S'},
+        {"no-header", no_argument, 0, 'n'},
         {"help", no_argument, 0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "s:k:w:t:p:l:H:f:o:S:h", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:k:w:t:p:l:H:f:o:S:nh", long_options, NULL)) != -1) {
         switch (opt) {
             case 's':
                 config.num_streams = atoi(optarg);
@@ -246,6 +248,9 @@ int main(int argc, char **argv) {
                 break;
             case 'S':
                 config.random_seed = (unsigned int)atoi(optarg);
+                break;
+            case 'n':
+                config.csv_no_header = true;
                 break;
             case 'h':
                 print_usage(argv[0]);
