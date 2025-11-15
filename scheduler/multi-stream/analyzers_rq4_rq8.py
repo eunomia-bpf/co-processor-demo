@@ -95,6 +95,7 @@ class RQ4_RQ8_Analyzer:
                 data = grouped[grouped['has_priority'] == has_prio]
                 if len(data) > 0:
                     label = 'With Priority' if has_prio else 'No Priority (Baseline)'
+                    # inversion_rate is already in 0-1 range, multiply by 100 for percentage display
                     ax1.plot(data['streams'], data['inversion_rate_mean'] * 100,
                              marker='o', label=label, linewidth=2)
                     ax1.fill_between(data['streams'],
@@ -408,12 +409,12 @@ class RQ4_RQ8_Analyzer:
             with_jitter = grouped[grouped['has_jitter'] == True]
 
             if len(no_jitter) > 0:
-                ax1.bar(x - width/2, no_jitter['concurrent_rate_mean'] * 100, width,
-                        yerr=no_jitter['concurrent_rate_std'] * 100,
+                ax1.bar(x - width/2, no_jitter['concurrent_rate_mean'], width,
+                        yerr=no_jitter['concurrent_rate_std'],
                         label='No Jitter', capsize=5, alpha=0.7)
             if len(with_jitter) > 0:
-                ax1.bar(x + width/2, with_jitter['concurrent_rate_mean'] * 100, width,
-                        yerr=with_jitter['concurrent_rate_std'] * 100,
+                ax1.bar(x + width/2, with_jitter['concurrent_rate_mean'], width,
+                        yerr=with_jitter['concurrent_rate_std'],
                         label='With Jitter', capsize=5, alpha=0.7)
 
             ax1.set_xlabel('Launch Frequency')
@@ -509,11 +510,11 @@ class RQ4_RQ8_Analyzer:
             for ktype in ['memory', 'mixed', 'compute']:
                 data = grouped[grouped['type'] == ktype].sort_values('ws_l2_ratio')
                 if len(data) > 0:
-                    ax2.plot(data['ws_l2_ratio'], data['util_mean'] * 100,
+                    ax2.plot(data['ws_l2_ratio'], data['util_mean'],
                              marker='o', label=ktype.upper(), linewidth=2)
                     ax2.fill_between(data['ws_l2_ratio'],
-                                     (data['util_mean'] - data['util_std']) * 100,
-                                     (data['util_mean'] + data['util_std']) * 100,
+                                     data['util_mean'] - data['util_std'],
+                                     data['util_mean'] + data['util_std'],
                                      alpha=0.2)
 
             ax2.axvline(x=1.0, color='r', linestyle='--', alpha=0.5, label='L2 Boundary')

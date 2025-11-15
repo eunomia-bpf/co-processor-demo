@@ -124,11 +124,11 @@ class RQ1_RQ3_Analyzer:
         for size, label in size_labels.items():
             data = grouped[grouped['size'] == size]
             if len(data) > 0:
-                ax2.plot(data['streams'], data['concurrent_rate_mean'] * 100,
+                ax2.plot(data['streams'], data['concurrent_rate_mean'],
                          marker='o', label=label, linewidth=2)
                 ax2.fill_between(data['streams'],
-                                 (data['concurrent_rate_mean'] - data['concurrent_rate_std']) * 100,
-                                 (data['concurrent_rate_mean'] + data['concurrent_rate_std']) * 100,
+                                 data['concurrent_rate_mean'] - data['concurrent_rate_std'],
+                                 data['concurrent_rate_mean'] + data['concurrent_rate_std'],
                                  alpha=0.2)
 
         ax2.set_xlabel('Number of Streams')
@@ -148,11 +148,11 @@ class RQ1_RQ3_Analyzer:
         for size, label in size_labels.items():
             data = grouped[grouped['size'] == size]
             if len(data) > 0:
-                ax3.plot(data['streams'], data['util_mean'] * 100,
+                ax3.plot(data['streams'], data['util_mean'],
                          marker='o', label=label, linewidth=2)
                 ax3.fill_between(data['streams'],
-                                 (data['util_mean'] - data['util_std']) * 100,
-                                 (data['util_mean'] + data['util_std']) * 100,
+                                 data['util_mean'] - data['util_std'],
+                                 data['util_mean'] + data['util_std'],
                                  alpha=0.2)
 
         ax3.set_xlabel('Number of Streams')

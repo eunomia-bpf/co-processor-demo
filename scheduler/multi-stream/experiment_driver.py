@@ -39,15 +39,11 @@ class ExperimentDriver:
 
         Args:
             args: Command line arguments for benchmark
-            first_run: If True, include header in CSV output
+            first_run: Not used anymore (kept for API compatibility)
 
         Returns:
-            CSV output string or None if failed
+            Clean CSV output string (header + data row) or None if failed
         """
-        # Add --no-header for non-first runs
-        if not first_run:
-            args.append('--no-header')
-
         cmd = [self.bench_path] + args
 
         try:
@@ -63,8 +59,33 @@ class ExperimentDriver:
                 print(f"stderr: {result.stderr[:500]}")
                 return None
 
-            # CSV output is on stderr
-            return result.stderr.strip()
+            # Extract clean CSV from stderr
+            # The benchmark outputs CSV in format:
+            # streams,kernels_per_stream,...
+            # 8,20,...
+            lines = result.stderr.splitlines()
+            header = None
+            data_rows = []
+
+            for line in lines:
+                line = line.strip()
+                # Look for the CSV header line (starts with "streams,")
+                if line.startswith('streams,'):
+                    header = line
+                # Look for CSV data lines (start with a digit)
+                elif line and line[0].isdigit():
+                    data_rows.append(line)
+
+            if header is None:
+                print("Warning: No CSV header found in benchmark output")
+                return None
+
+            if not data_rows:
+                print("Warning: No CSV data rows found in benchmark output")
+                return None
+
+            # Return header + all data rows
+            return header + '\n' + '\n'.join(data_rows)
 
         except subprocess.TimeoutExpired:
             print(f"Warning: Benchmark timed out")
