@@ -327,8 +327,10 @@ OSDI 级别解读可以是：
 **图**：
 
 * 折线图
-* X：offered load（用总 arrival rate 近似）
+* X：**launch frequency (Hz)**（直接用 `launch_freq` 列，log scale）
 * Y：P99 e2e（高优先级一条线，低优先级一条线）
+
+> **实现注意**：当前 analyzer 已改为直接用 `launch_freq` 列并按频率排序，避免使用派生的 offered_load。
 
 从图可以读出：
 
@@ -513,6 +515,7 @@ OSDI 级结论：
 **配置**：
 
 * sweeps：`workload_size`，让 `working_set_mb` 覆盖 `< L2`、`≈L2`、`>L2` 几档
+  * **RTX 5090 实现**：L2=96MB，workload_size ∈ {1M, 2M, 3M, 4M, 6M, 8M} → WS ∈ {32, 64, 96, 128, 192, 256} MB
 * 记录 aggregated 的 `throughput`, `util`, `concurrent_rate`
 * 可分 kernel_type（memory-heavy vs compute-heavy）
 
@@ -553,13 +556,18 @@ OSDI 级 story：
 **图**（offline 聚合）：
 
 * 柱状图
-* X：模式（A/B/C）
+* X：模式（A/B/C），也可扩展为 Mode D: 16 进程 × 2 streams
 * Y：
 
   * either `throughput`（global）
   * or per‑tenant Jain fairness（你自己在 Python 里算 per‑tenant GPU time，然后 Jain index）
 
-这就可以讲一段：“CUDA scheduler 在 multi‑process 情况下是否更/更不公平”。
+> **实现注意**：
+> - 多进程需真正并发（`subprocess.Popen`），而非串行调用
+> - Jain 计算时需用 `global_stream_id = stream_id + proc_id * streams_per_process`
+> - 时间窗口用 `end_time_ms.max()` 而非 `start_time_ms.max()`
+
+这就可以讲一段："CUDA scheduler 在 multi‑process 情况下是否更/更不公平"。
 
 ---
 

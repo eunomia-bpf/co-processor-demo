@@ -25,6 +25,7 @@ struct BenchmarkConfig {
     std::vector<int> kernels_per_stream_custom; // For load imbalance experiments
     std::vector<KernelType> kernel_types_per_stream; // For heterogeneous workloads
     std::vector<float> launch_frequency_per_stream; // Launch frequency in Hz per stream (0 = max)
+    std::vector<int> workload_size_per_stream; // Custom workload size per stream (for RQ4.5)
     bool use_heterogeneous; // Enable different kernel types per stream
     std::string csv_output_file; // CSV output file path for raw timing data
     unsigned int random_seed; // Random seed for jitter control

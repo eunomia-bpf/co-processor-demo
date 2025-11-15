@@ -99,6 +99,7 @@ void print_usage(const char *prog_name) {
     printf("  -l, --load-imbalance SPEC  Custom kernels per stream (e.g., \"5,10,20,40\")\n");
     printf("  -H, --heterogeneous SPEC   Heterogeneous kernel types (e.g., \"memory,memory,compute,compute\")\n");
     printf("  -f, --launch-frequency SPEC  Launch frequency per stream in Hz (e.g., \"100,100,20,20\", 0=max)\n");
+    printf("  -W, --per-stream-sizes SPEC  Workload size per stream (e.g., \"65536,262144,1048576,4194304\")\n");
     printf("  -o, --csv-output FILE   Write raw timing data to CSV file\n");
     printf("  -S, --seed NUM          Random seed for jitter control (default: 0)\n");
     printf("  -n, --no-header         Skip CSV header (for batch runs)\n");
@@ -148,6 +149,7 @@ int main(int argc, char **argv) {
         {"load-imbalance", required_argument, 0, 'l'},
         {"heterogeneous", required_argument, 0, 'H'},
         {"launch-frequency", required_argument, 0, 'f'},
+        {"per-stream-sizes", required_argument, 0, 'W'},
         {"csv-output", required_argument, 0, 'o'},
         {"seed", required_argument, 0, 'S'},
         {"no-header", no_argument, 0, 'n'},
@@ -156,7 +158,7 @@ int main(int argc, char **argv) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "s:k:w:t:p:l:H:f:o:S:nh", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "s:k:w:t:p:l:H:f:W:o:S:nh", long_options, NULL)) != -1) {
         switch (opt) {
             case 's':
                 config.num_streams = atoi(optarg);
@@ -243,6 +245,20 @@ int main(int argc, char **argv) {
                     }
                 }
                 break;
+            case 'W':
+                {
+                    // Parse comma-separated list of workload sizes per stream
+                    char *token = strtok(optarg, ",");
+                    while (token != NULL) {
+                        config.workload_size_per_stream.push_back(atoi(token));
+                        token = strtok(NULL, ",");
+                    }
+                    // Override num_streams if custom specified
+                    if (!config.workload_size_per_stream.empty()) {
+                        config.num_streams = config.workload_size_per_stream.size();
+                    }
+                }
+                break;
             case 'o':
                 config.csv_output_file = optarg;
                 break;
@@ -273,19 +289,27 @@ int main(int argc, char **argv) {
     std::vector<cuda_unique_ptr<float>> d_data;
     std::vector<cuda_unique_ptr<float>> d_temp;
     std::vector<cuda_unique_ptr<float>> d_matrix_c;
+    std::vector<int> stream_workload_sizes(config.num_streams);
 
     d_data.reserve(config.num_streams);
     d_temp.reserve(config.num_streams);
     d_matrix_c.reserve(config.num_streams);
 
     for (int i = 0; i < config.num_streams; i++) {
-        d_data.emplace_back(make_cuda_memory<float>(config.workload_size));
-        d_temp.emplace_back(make_cuda_memory<float>(config.workload_size));
-        CUDA_CHECK(cudaMemset(d_data[i].get(), 0, config.workload_size * sizeof(float)));
+        // Determine workload size for this stream
+        int current_size = config.workload_size;
+        if (!config.workload_size_per_stream.empty() && i < (int)config.workload_size_per_stream.size()) {
+            current_size = config.workload_size_per_stream[i];
+        }
+        stream_workload_sizes[i] = current_size;
+
+        d_data.emplace_back(make_cuda_memory<float>(current_size));
+        d_temp.emplace_back(make_cuda_memory<float>(current_size));
+        CUDA_CHECK(cudaMemset(d_data[i].get(), 0, current_size * sizeof(float)));
 
         // Allocate result matrix for GEMM
         if (config.kernel_type == GEMM) {
-            d_matrix_c.emplace_back(make_cuda_memory<float>(config.workload_size));
+            d_matrix_c.emplace_back(make_cuda_memory<float>(current_size));
         } else {
             d_matrix_c.emplace_back(nullptr);
         }
@@ -343,12 +367,15 @@ int main(int argc, char **argv) {
 
     // Launch configuration
     dim3 block(256);
-    dim3 grid((config.workload_size + block.x - 1) / block.x);
+    // Note: grid will be computed per-stream if per-stream sizes are used
 
     // Warmup
     for (int s = 0; s < config.num_streams; s++) {
+        int current_size = stream_workload_sizes[s];
+        dim3 grid((current_size + block.x - 1) / block.x);
+
         launch_kernel(config.kernel_type, d_data[s].get(), d_temp[s].get(),
-                     config.workload_size, grid, block, *streams[s], d_matrix_c[s].get());
+                     current_size, grid, block, *streams[s], d_matrix_c[s].get());
     }
     CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -406,6 +433,10 @@ int main(int argc, char **argv) {
                 current_kernel_type = config.kernel_types_per_stream[s];
             }
 
+            // Get workload size for this stream
+            int current_size = stream_workload_sizes[s];
+            dim3 current_grid((current_size + block.x - 1) / block.x);
+
             // Get launch frequency for this stream (0 = max rate)
             float launch_freq_hz = 0.0f;
             if (!config.launch_frequency_per_stream.empty() && s < (int)config.launch_frequency_per_stream.size()) {
@@ -444,9 +475,9 @@ int main(int argc, char **argv) {
                 // Record kernel start event
                 CUDA_CHECK(cudaEventRecord(*start_events[event_idx], *streams[s]));
 
-                // Launch kernel to this stream
+                // Launch kernel to this stream with per-stream size
                 launch_kernel(current_kernel_type, d_data[s].get(), d_temp[s].get(),
-                             config.workload_size, grid, block, *streams[s], d_matrix_c[s].get());
+                             current_size, current_grid, block, *streams[s], d_matrix_c[s].get());
 
                 // Record kernel end event
                 CUDA_CHECK(cudaEventRecord(*end_events[event_idx], *streams[s]));
@@ -510,8 +541,9 @@ int main(int argc, char **argv) {
         timings[i].e2e_latency_ms = timings[i].end_time_ms - timings[i].enqueue_time_ms;       // End-to-end latency
     }
 
-    // Output metrics
-    compute_metrics(timings, config, grid.x, block.x);
+    // Output metrics (use first stream's grid size for reporting)
+    int first_grid_x = (stream_workload_sizes[0] + block.x - 1) / block.x;
+    compute_metrics(timings, config, first_grid_x, block.x);
 
     // Write CSV output if requested
     if (!config.csv_output_file.empty()) {
