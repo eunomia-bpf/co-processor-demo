@@ -265,16 +265,30 @@ class RQ1_RQ3_Analyzer:
         print("  RQ2.3: throughput vs offered load")
         df = self.load_csv('rq2_3_throughput_vs_load.csv')
         if df is not None:
-            df['has_jitter'] = df.get('seed', 0) != 0
-            df['offered_load_est'] = df['total_kernels'] / (df['wall_time_ms'] / 1000.0)
+            # Use actual seed column if available
+            df['has_jitter'] = df.get('seed', pd.Series([0]*len(df))) != 0
 
-            df_sorted = df.sort_values('offered_load_est')
+            # Calculate offered load from launch_frequency
+            # offered_load = streams * launch_freq * kernels_per_stream
+            # For freq=0 (max rate), use achieved throughput as proxy
+            if 'launch_freq' in df.columns:
+                df['offered_load'] = df.apply(
+                    lambda row: row['streams'] * row['launch_freq']
+                    if row['launch_freq'] > 0
+                    else row['throughput'],  # freq=0 means max rate
+                    axis=1
+                )
+            else:
+                # Fallback for old CSV without launch_freq
+                df['offered_load'] = df['total_kernels'] / (df['wall_time_ms'] / 1000.0)
+
+            df_sorted = df.sort_values('offered_load')
 
             for has_jitter in [False, True]:
                 data = df_sorted[df_sorted['has_jitter'] == has_jitter]
                 if len(data) > 0:
-                    label = 'With Jitter' if has_jitter else 'No Jitter'
-                    ax3.scatter(data['offered_load_est'], data['throughput'],
+                    label = 'With Jitter' if has_jitter else 'No Jitter (Periodic)'
+                    ax3.scatter(data['offered_load'], data['throughput'],
                                 label=label, alpha=0.6, s=50)
 
             ax3.set_xlabel('Offered Load (kernels/sec)')
@@ -284,8 +298,8 @@ class RQ1_RQ3_Analyzer:
             ax3.grid(True, alpha=0.3)
             # Add y=x reference line
             if len(df) > 0:
-                max_val = max(df['offered_load_est'].max(), df['throughput'].max())
-                ax3.plot([0, max_val], [0, max_val], 'k--', alpha=0.3, label='y=x')
+                max_val = max(df['offered_load'].max(), df['throughput'].max())
+                ax3.plot([0, max_val], [0, max_val], 'k--', alpha=0.3, label='Ideal (100% efficiency)')
 
         fig.suptitle('RQ2: Throughput & Workload Type', fontsize=16, fontweight='bold')
         self.save_figure('rq2_throughput')

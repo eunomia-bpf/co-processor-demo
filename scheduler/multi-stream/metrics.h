@@ -281,7 +281,8 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
         fprintf(stderr, "avg_queue_wait,max_queue_wait,");
         fprintf(stderr, "concurrent_rate,util,jains_index,max_concurrent,avg_concurrent,");
         fprintf(stderr, "inversions,inversion_rate,working_set_mb,fits_in_l2,svc_stddev,grid_size,block_size,");
-        fprintf(stderr, "per_priority_avg,per_priority_p50,per_priority_p99\n");
+        fprintf(stderr, "per_priority_avg,per_priority_p50,per_priority_p99,");
+        fprintf(stderr, "launch_freq,seed\n");
     }
 
     // Data row
@@ -383,6 +384,19 @@ void compute_metrics(const std::vector<KernelTiming> &timings,
             first = false;
         }
     }
+    fprintf(stderr, ",");
+
+    // Output launch_freq (average across streams, or first stream if uniform)
+    if (!config.launch_frequency_per_stream.empty()) {
+        fprintf(stderr, "%.1f", config.launch_frequency_per_stream[0]);
+    } else {
+        fprintf(stderr, "0");
+    }
+    fprintf(stderr, ",");
+
+    // Output random seed
+    fprintf(stderr, "%u", config.random_seed);
+
     fprintf(stderr, "\n");
 }
 

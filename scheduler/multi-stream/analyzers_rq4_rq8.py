@@ -194,6 +194,8 @@ class RQ4_RQ8_Analyzer:
             config_order = ['Only Fast', 'Fast+Slow, No Priority', 'Fast+Slow, With Priority']
             grouped['config'] = pd.Categorical(grouped['config'], categories=config_order, ordered=True)
             grouped = grouped.sort_values('config')
+            # Filter out Unknown/NaN configs
+            grouped = grouped[grouped['config'].isin(config_order)]
 
             x = np.arange(len(grouped))
             ax3.bar(x, grouped['e2e_p99_mean'], yerr=grouped['e2e_p99_std'],
@@ -229,7 +231,8 @@ class RQ4_RQ8_Analyzer:
 
             grouped['pattern'] = pd.Categorical(grouped['pattern'], categories=patterns, ordered=True)
             grouped = grouped.sort_values('pattern')
-            grouped = grouped[grouped['pattern'] != 'Unknown']
+            # Filter out Unknown/NaN patterns
+            grouped = grouped[grouped['pattern'].isin(patterns)]
 
             x = np.arange(len(grouped))
             ax4.bar(x, grouped['jains_index_mean'], yerr=grouped['jains_index_std'],
@@ -298,7 +301,8 @@ class RQ4_RQ8_Analyzer:
 
             grouped['pattern'] = pd.Categorical(grouped['pattern'], categories=patterns, ordered=True)
             grouped = grouped.sort_values('pattern')
-            grouped = grouped[grouped['pattern'] != 'Unknown']
+            # Filter out Unknown/NaN patterns
+            grouped = grouped[grouped['pattern'].isin(patterns)]
 
             ax1.plot(grouped['imbalance_cv'], grouped['jains_index_mean'],
                      marker='o', linewidth=2, markersize=10)
@@ -340,7 +344,9 @@ class RQ4_RQ8_Analyzer:
         print("  RQ5.3: Homogeneous vs Heterogeneous")
         df = self.load_csv('rq5_3_homo_vs_hetero.csv')
         if df is not None:
-            df['is_hetero'] = df.get('type_detail', '').str.len() > 0
+            # Heterogeneous if type_detail contains colon-separated types (e.g., "memory:compute")
+            # Homogeneous if type_detail is empty or "uniform"
+            df['is_hetero'] = df.get('type_detail', '').apply(lambda x: ':' in str(x))
 
             grouped = df.groupby(['streams', 'is_hetero']).agg({
                 'throughput': ['mean', 'std'],
@@ -386,12 +392,18 @@ class RQ4_RQ8_Analyzer:
         # Load data once
         df = self.load_csv('rq6_jitter_effects.csv')
         if df is not None:
-            df['has_jitter'] = df.get('seed', 0) != 0
-            df['freq_est'] = df['total_kernels'] / (df['wall_time_ms'] / 1000.0) / df['streams']
+            # Use actual seed column if available
+            df['has_jitter'] = df.get('seed', pd.Series([0]*len(df))) != 0
+
+            # Use launch_freq if available, otherwise estimate from throughput
+            if 'launch_freq' in df.columns:
+                df['freq_bin_val'] = df['launch_freq']
+            else:
+                df['freq_bin_val'] = df['total_kernels'] / (df['wall_time_ms'] / 1000.0) / df['streams']
 
             freq_bins = [0, 75, 150, 300, 600]
             freq_labels = ['50Hz', '100Hz', '200Hz', '500Hz']
-            df['freq_bin'] = pd.cut(df['freq_est'], bins=freq_bins, labels=freq_labels)
+            df['freq_bin'] = pd.cut(df['freq_bin_val'], bins=freq_bins, labels=freq_labels)
 
             # RQ6.1: concurrent_rate vs jitter
             print("  RQ6.1: Concurrent rate vs jitter")
