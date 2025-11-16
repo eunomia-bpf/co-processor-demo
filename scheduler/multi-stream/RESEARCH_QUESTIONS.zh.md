@@ -643,39 +643,111 @@ OSDI 级 story：
 
 ## RQ9：多进程 / 多租户（Multi-Process vs Single-Process）
 
-虽然你 C++ 里还没显式 `tenant_id` 字段，但 **raw CSV 里有 host 时间戳**，所以你可以通过：
+**问题**：在相同总 stream 数和总工作量下，将并发 stream 分配到不同数量的进程时，CUDA scheduler 在 throughput、tenant fairness、tail latency 上的行为差异？
 
-* 各进程单独 `--csv-output run_procX.csv`；
-* offline merge 时给每个文件加 `tenant_id=X`；
-* 用 `host_launch_us` 对齐时间线。
+**设计核心**：
 
-可以做一些 multi‑process sub‑RQ（如果你真想对齐 REEF / Gandiva 那类工作）：
+* 固定总 stream 数为 32，总工作量为 960 kernels（每 stream 30 个）
+* 变化进程粒度：1×32, 4×8, 8×4, 16×2
+* 每个进程视为一个 **tenant**，测量 per-tenant 指标
+* 使用真实并发执行（`subprocess.Popen`）而非串行
 
-### Sub‑RQ9.1：单进程多 stream vs 多进程少 stream（公平性&并发）
+---
 
-**问题**：相同总 stream 数下，single‑process 多 stream 和 multi‑process（每进程少量 stream）在 concurrency、公平性上的差异？
+### Sub‑RQ9.1：Throughput、Fairness、Latency vs Process Configuration
+
+**问题**：在不同进程粒度下，整体吞吐、tenant 公平性、worst-case tail latency 如何变化？
+
 **配置**：
 
-* Mode A：1 进程，32 streams
-* Mode B：4 进程，每个 8 streams
-* Mode C：8 进程，每个 4 streams
-* 每进程同一 kernel_type / workload_size
+| 配置 | 进程数 | 每进程 streams | 总 streams | 每 stream kernels | Kernel size | Type |
+|------|--------|----------------|------------|-------------------|-------------|------|
+| 1×32 | 1      | 32             | 32         | 30                | 1M          | mixed |
+| 4×8  | 4      | 8              | 32         | 30                | 1M          | mixed |
+| 8×4  | 8      | 4              | 32         | 30                | 1M          | mixed |
+| 16×2 | 16     | 2              | 32         | 30                | 1M          | mixed |
 
-**图**（offline 聚合）：
+**执行方式**：
 
-* 柱状图
-* X：模式（A/B/C），也可扩展为 Mode D: 16 进程 × 2 streams
-* Y：
+* **单进程**（1×32）：使用 C++ aggregated CSV 输出
+* **多进程**（4×8, 8×4, 16×2）：
+  * 并发启动所有进程（`subprocess.Popen`）
+  * 每个进程写独立的 raw CSV（`--csv-output`, `--no-header`）
+  * 等待所有进程完成
+  * 如果任何进程失败，丢弃整个 run
 
-  * either `throughput`（global）
-  * or per‑tenant Jain fairness（你自己在 Python 里算 per‑tenant GPU time，然后 Jain index）
+**测量方法（多进程）**：
 
-> **实现注意**：
-> - 多进程需真正并发（`subprocess.Popen`），而非串行调用
-> - Jain 计算时需用 `global_stream_id = stream_id + proc_id * streams_per_process`
-> - 时间窗口用 `end_time_ms.max()` 而非 `start_time_ms.max()`
+1. **Global Stream ID 分配**：
+   * 每个进程的 stream_id 加上 `proc_id * streams_per_process` 偏移
+   * 保证每个进程的 stream 在全局唯一
 
-这就可以讲一段："CUDA scheduler 在 multi‑process 情况下是否更/更不公平"。
+2. **Throughput**（全局）：
+   * 全局时间窗口：从所有 kernel 的 `min(start_time_ms)` 到 `max(end_time_ms)`
+   * `throughput = total_kernels / wall_time_sec`
+
+3. **Global P99 Latency**（全局）：
+   * 所有 kernel 的 `e2e_latency_ms` 的第 99 百分位
+
+4. **Per-Process (Tenant) Fairness**：
+   * 计算每个进程消耗的总 GPU 时间（sum of `duration_ms`）
+   * 基于 GPU 时间计算 Jain's fairness index
+   * `jains_index = (sum x)^2 / (n * sum x^2)`
+
+5. **Worst-Tenant P99 Latency**：
+   * 计算每个进程（tenant）内所有 kernel 的 P99
+   * 取所有 tenant P99 的最大值（worst-case）
+   * 展示最受影响 tenant 的 SLO violation
+
+6. **GPU Utilization**：
+   * 使用 sweep-line 算法计算 GPU 有 kernel 运行的时间占比
+   * 基于所有 kernel 的 start/end 事件
+
+**测量方法（单进程）**：
+
+* 使用 C++ 的 aggregated CSV 输出
+* `per_proc_p99` = `e2e_p99`（因为只有 1 个进程）
+* `jains_index` 为 per-stream fairness（C++ 计算）
+  * 对于 1 个 tenant 的场景，tenant fairness 退化为 trivial 1.0
+  * 这里的 Jain 值主要作为 sanity check
+
+**图**（2×2 subplots）：
+
+* **(a) Throughput vs Configuration**：
+  * X 轴：配置（1×32, 4×8, 8×4, 16×2）
+  * Y 轴：Throughput (kernels/sec)
+  * 柱状图 + error bar (std across runs)
+
+* **(b) Per-Process Fairness vs Configuration**：
+  * X 轴：配置
+  * Y 轴：Jain's Fairness Index (per-process)
+  * 柱状图 + error bar
+  * Y 范围：[0, 1.1]
+
+* **(c) Global P99 Latency vs Configuration**：
+  * X 轴：配置
+  * Y 轴：Global E2E P99 Latency (ms)
+  * 柱状图 + error bar
+
+* **(d) Worst-Tenant P99 vs Configuration**：
+  * X 轴：配置
+  * Y 轴：Worst-Tenant P99 Latency (ms)
+  * 柱状图 + error bar
+  * **关键**：展示 SLO violation for the most affected tenant
+
+**指标语义**：
+
+* **Throughput**：整体系统吞吐（kernels/sec）
+* **Per-Process Fairness**：各 tenant 获得的 GPU 时间是否均衡（Jain index）
+* **Global P99**：从所有 kernel 视角看的 tail latency
+* **Worst-Tenant P99**：从最差 tenant 视角看的 tail latency（SLO violation）
+
+**CSV 输出**：
+
+* 文件：`results/rq9_multiprocess.csv`
+* 额外字段：`per_proc_p99`（追加到最后一列）
+* 单进程行：使用 C++ aggregated 格式 + `per_proc_p99`
+* 多进程行：Python 计算的 metrics + `per_proc_p99`
 
 ---
 

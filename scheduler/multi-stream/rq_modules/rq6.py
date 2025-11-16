@@ -119,16 +119,24 @@ class RQ6(RQBase):
                 if csv_output:
                     lines = csv_output.split('\n')
                     if len(csv_lines) == 0:
-                        csv_lines.extend(lines)
+                        # Add 'pattern' column to header
+                        header = lines[0] + ',pattern'
+                        csv_lines.append(header)
+                        data_lines = lines[1:] if len(lines) > 1 else []
                     else:
-                        csv_lines.extend([l for l in lines if not l.startswith('streams,')])
+                        data_lines = [l for l in lines if not l.startswith('streams,')]
+
+                    # Append 'homogeneous' to each data line
+                    for line in data_lines:
+                        if line.strip():
+                            csv_lines.append(line + ',homogeneous')
 
                 time.sleep(0.5)
 
             # Heterogeneous: mix of types
             print(f"    streams={streams}, heterogeneous")
-            # Create heterogeneous pattern: cycle through types
-            types = ['memory', 'compute', 'mixed', 'gemm']
+            # Create heterogeneous pattern: cycle through types (avoid gemm due to CUDA errors)
+            types = ['memory', 'compute', 'mixed']
             hetero_spec = ','.join([types[i % len(types)] for i in range(streams)])
 
             for run_idx in range(self.num_runs):
@@ -136,6 +144,7 @@ class RQ6(RQBase):
                     '--streams', str(streams),
                     '--kernels', '20',
                     '--size', '1048576',
+                    '--type', 'mixed',  # Add explicit type
                     '--heterogeneous', hetero_spec,
                 ]
 
@@ -143,7 +152,12 @@ class RQ6(RQBase):
 
                 if csv_output:
                     lines = csv_output.split('\n')
-                    csv_lines.extend([l for l in lines if not l.startswith('streams,')])
+                    data_lines = [l for l in lines if l.strip() and not l.startswith('streams,')]
+
+                    # Append 'heterogeneous' to each data line
+                    for line in data_lines:
+                        if line.strip():
+                            csv_lines.append(line + ',heterogeneous')
 
                 time.sleep(0.5)
 
@@ -194,7 +208,7 @@ class RQ6(RQBase):
 
             grouped.columns = ['pattern', 'jains_index_mean', 'jains_index_std', 'sample_size', 'imbalance_cv']
 
-            expected_patterns = ['Balanced', 'Moderate', 'Severe']
+            expected_patterns = ['Balanced', 'Mild', 'Moderate', 'Severe']
             grouped['pattern'] = pd.Categorical(grouped['pattern'], categories=expected_patterns, ordered=True)
             grouped = grouped.sort_values('pattern')
 
@@ -249,20 +263,24 @@ class RQ6(RQBase):
         print("  RQ6.3: Homogeneous vs Heterogeneous")
         df = self.load_csv('rq6_3_homo_vs_hetero.csv')
         if df is not None:
-            df['is_hetero'] = df.get('type_detail', '').apply(lambda x: ':' in str(x))
+            # Use the 'pattern' column directly instead of heuristics
+            if 'pattern' not in df.columns:
+                print("    Warning: 'pattern' column not found, using fallback heuristic")
+                df['pattern'] = df.get('type_detail', '').apply(
+                    lambda x: 'heterogeneous' if ':' in str(x) else 'homogeneous')
 
-            grouped = df.groupby(['streams', 'is_hetero']).agg({
+            grouped = df.groupby(['streams', 'pattern']).agg({
                 'throughput': ['mean', 'std', 'count'],
                 'concurrent_rate': ['mean', 'std']
             }).reset_index()
 
-            grouped.columns = ['streams', 'is_hetero', 'throughput_mean', 'throughput_std', 'sample_size',
+            grouped.columns = ['streams', 'pattern', 'throughput_mean', 'throughput_std', 'sample_size',
                                'concurrent_rate_mean', 'concurrent_rate_std']
 
-            for is_hetero in [False, True]:
-                data = grouped[grouped['is_hetero'] == is_hetero]
+            for pattern in ['homogeneous', 'heterogeneous']:
+                data = grouped[grouped['pattern'] == pattern]
                 if len(data) > 0:
-                    label = f'Heterogeneous (n={len(data)})' if is_hetero else f'Homogeneous (n={len(data)})'
+                    label = f'Heterogeneous (n={len(data)})' if pattern == 'heterogeneous' else f'Homogeneous (n={len(data)})'
                     ax3.plot(data['streams'], data['throughput_mean'],
                              marker='o', label=label, linewidth=2, markersize=8)
                     ax3.fill_between(data['streams'],
