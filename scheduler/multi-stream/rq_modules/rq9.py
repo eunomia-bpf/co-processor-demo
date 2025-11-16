@@ -26,7 +26,6 @@ class RQ9(RQBase):
         """
         print("\n=== Running RQ9 Experiments: Multi-Process vs Single-Process ===")
 
-        total_streams = 32
         configurations = [
             ('1proc_32streams', 1, 32),
             ('4proc_8streams', 4, 8),
@@ -57,9 +56,43 @@ class RQ9(RQBase):
                     if csv_output:
                         lines = csv_output.split('\n')
                         if len(csv_lines) == 0:
-                            csv_lines.extend(lines)
+                            # Add per_proc_p99 to header
+                            header_line = lines[0]
+                            modified_header = header_line + ',per_proc_p99'
+                            csv_lines.append(modified_header)
+
+                            # Find e2e_p99 column index from header (avoid magic number)
+                            header_parts = header_line.split(',')
+                            try:
+                                e2e_p99_idx = header_parts.index('e2e_p99')
+                            except ValueError:
+                                print("    Warning: e2e_p99 column not found in header, using index 16")
+                                e2e_p99_idx = 16
+
+                            # Add per_proc_p99 = e2e_p99 for single process to data rows
+                            for line in lines[1:]:
+                                if line.strip() and not line.startswith('streams,'):
+                                    parts = line.split(',')
+                                    e2e_p99_val = parts[e2e_p99_idx] if len(parts) > e2e_p99_idx else '0'
+                                    modified_line = line + f',{e2e_p99_val}'
+                                    csv_lines.append(modified_line)
                         else:
-                            csv_lines.extend([l for l in lines if not l.startswith('streams,')])
+                            # Reuse the e2e_p99 index from first run (already stored in header)
+                            # Parse header to find e2e_p99 index
+                            first_header = csv_lines[0]
+                            header_parts = first_header.rstrip(',per_proc_p99').split(',')
+                            try:
+                                e2e_p99_idx = header_parts.index('e2e_p99')
+                            except ValueError:
+                                e2e_p99_idx = 16
+
+                            # Add per_proc_p99 = e2e_p99 for single process to data rows
+                            for line in lines:
+                                if line.strip() and not line.startswith('streams,'):
+                                    parts = line.split(',')
+                                    e2e_p99_val = parts[e2e_p99_idx] if len(parts) > e2e_p99_idx else '0'
+                                    modified_line = line + f',{e2e_p99_val}'
+                                    csv_lines.append(modified_line)
 
                 else:
                     # For multiple processes, run them CONCURRENTLY using subprocess.Popen
@@ -102,6 +135,11 @@ class RQ9(RQBase):
                     successful = sum(1 for _, success, _ in results if success)
                     print(f"    Completed: {successful}/{num_processes} processes succeeded")
 
+                    # Skip this run if not all processes succeeded
+                    if successful != num_processes:
+                        print(f"    Skipping run {run_idx} due to failed processes")
+                        continue
+
                     # Aggregate metrics from all raw CSVs for this run
                     raw_files = [f for _, success, f in results if success and f]
                     if raw_files:
@@ -129,24 +167,41 @@ class RQ9(RQBase):
                             wall_time_sec = (global_end - global_start) / 1000.0
                             throughput = total_kernels / wall_time_sec if wall_time_sec > 0 else 0
 
-                            # Calculate P99 latency
+                            # Calculate P99 latency (global)
                             e2e_p99 = combined_df['e2e_latency_ms'].quantile(0.99)
 
-                            # Calculate Jain's fairness index per stream (using global stream IDs)
-                            stream_throughputs = []
-                            for stream_id in combined_df['global_stream_id'].unique():
-                                stream_df = combined_df[combined_df['global_stream_id'] == stream_id]
-                                stream_start = stream_df['start_time_ms'].min()
-                                stream_end = stream_df['end_time_ms'].max()
-                                stream_time = (stream_end - stream_start) / 1000.0
-                                stream_tput = len(stream_df) / stream_time if stream_time > 0 else 0
-                                stream_throughputs.append(stream_tput)
+                            # Calculate per-process (tenant) P99 latency
+                            proc_p99_values = []
+                            for proc_id in range(effective_procs):
+                                proc_df = combined_df[combined_df['global_stream_id'].between(
+                                    proc_id * streams_per_process,
+                                    (proc_id + 1) * streams_per_process - 1
+                                )]
+                                if len(proc_df) > 0:
+                                    proc_p99_values.append(proc_df['e2e_latency_ms'].quantile(0.99))
+
+                            # Worst-case tenant P99 (max across all tenants)
+                            # This shows SLO violation for the most affected tenant
+                            per_proc_p99 = np.max(proc_p99_values) if proc_p99_values else 0
+
+                            # Calculate Jain's fairness index per PROCESS (tenant fairness)
+                            # Each process is a tenant - measure GPU time fairness across tenants
+                            proc_throughputs = []
+                            for proc_id in range(effective_procs):
+                                proc_df = combined_df[combined_df['global_stream_id'].between(
+                                    proc_id * streams_per_process,
+                                    (proc_id + 1) * streams_per_process - 1
+                                )]
+                                if len(proc_df) > 0:
+                                    # Total GPU time consumed by this process (tenant)
+                                    proc_gpu_time = proc_df['duration_ms'].sum()
+                                    proc_throughputs.append(proc_gpu_time)
 
                             # Jain's index = (sum x)^2 / (n * sum x^2)
-                            if stream_throughputs:
-                                sum_tput = sum(stream_throughputs)
-                                sum_tput_sq = sum(x*x for x in stream_throughputs)
-                                n = len(stream_throughputs)
+                            if proc_throughputs:
+                                sum_tput = sum(proc_throughputs)
+                                sum_tput_sq = sum(x*x for x in proc_throughputs)
+                                n = len(proc_throughputs)
                                 jains_index = (sum_tput * sum_tput) / (n * sum_tput_sq) if sum_tput_sq > 0 else 1.0
                             else:
                                 jains_index = 1.0
@@ -194,7 +249,7 @@ class RQ9(RQBase):
                                 '',  # max_queue_wait
                                 '',  # concurrent_rate
                                 f'{util:.1f}',  # util
-                                f'{jains_index:.4f}',  # jains_index
+                                f'{jains_index:.4f}',  # jains_index (now per-process)
                                 '',  # max_concurrent
                                 '',  # avg_concurrent
                                 '',  # inversions
@@ -209,6 +264,7 @@ class RQ9(RQBase):
                                 '',  # per_priority_p99
                                 '0',  # launch_freq
                                 '0',  # seed
+                                f'{per_proc_p99:.2f}',  # per_proc_p99 (avg across tenants)
                             ]
 
                             csv_lines.append(','.join(csv_line_parts))
@@ -222,10 +278,16 @@ class RQ9(RQBase):
         Analyze RQ9: Multi-process vs single-process fairness and throughput.
 
         Sub-RQ9.1: Fairness and throughput comparison across process configurations
+
+        Shows 4 metrics:
+        - Throughput
+        - Per-process (tenant) fairness
+        - Global P99 latency
+        - Worst-case tenant P99 latency (max across all tenants)
         """
         print("\n=== Analyzing RQ9: Multi-Process vs Single-Process ===")
 
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(20, 6))
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
 
         # Load aggregated data
         df = self.load_csv('rq9_multiprocess.csv')
@@ -250,14 +312,14 @@ class RQ9(RQBase):
             grouped = df.groupby('config').agg({
                 'throughput': ['mean', 'std'],
                 'jains_index': ['mean', 'std'],
-                'concurrent_rate': ['mean', 'std'],
                 'e2e_p99': ['mean', 'std'],
+                'per_proc_p99': ['mean', 'std'],
             }).reset_index()
 
             grouped.columns = ['config', 'throughput_mean', 'throughput_std',
                              'jains_mean', 'jains_std',
-                             'concurrent_rate_mean', 'concurrent_rate_std',
-                             'e2e_p99_mean', 'e2e_p99_std']
+                             'e2e_p99_mean', 'e2e_p99_std',
+                             'per_proc_p99_mean', 'per_proc_p99_std']
 
             # Sort by configuration order
             config_order = ['1×32', '4×8', '8×4', '16×2']
@@ -272,39 +334,52 @@ class RQ9(RQBase):
             ax1.bar(x, grouped['throughput_mean'], width,
                    yerr=yerr,
                    capsize=5, alpha=0.7, color='steelblue')
-            ax1.set_xlabel('Configuration (processes × streams/proc)')
-            ax1.set_ylabel('Throughput (kernels/sec)')
-            ax1.set_title('(a) Throughput vs Process Configuration')
+            ax1.set_xlabel('Configuration (processes × streams/proc)', fontsize=11)
+            ax1.set_ylabel('Throughput (kernels/sec)', fontsize=11)
+            ax1.set_title('(a) Throughput vs Process Configuration', fontsize=12, fontweight='bold')
             ax1.set_xticks(x)
             ax1.set_xticklabels(grouped['config'])
             ax1.grid(True, alpha=0.3, axis='y')
 
-            # Subplot 2: Jain's Fairness Index
+            # Subplot 2: Per-Process (Tenant) Fairness
             yerr = grouped['jains_std'].fillna(0) if grouped['jains_std'].notna().any() else None
             ax2.bar(x, grouped['jains_mean'], width,
                    yerr=yerr,
                    capsize=5, alpha=0.7, color='seagreen')
-            ax2.set_xlabel('Configuration (processes × streams/proc)')
-            ax2.set_ylabel("Jain's Fairness Index")
-            ax2.set_title('(b) Fairness vs Process Configuration')
+            ax2.set_xlabel('Configuration (processes × streams/proc)', fontsize=11)
+            ax2.set_ylabel("Jain's Fairness Index (per-process)", fontsize=11)
+            ax2.set_title('(b) Per-Process Fairness vs Configuration', fontsize=12, fontweight='bold')
             ax2.set_xticks(x)
             ax2.set_xticklabels(grouped['config'])
             ax2.set_ylim([0, 1.1])
             ax2.grid(True, alpha=0.3, axis='y')
 
-            # Subplot 3: P99 Latency
+            # Subplot 3: Global P99 Latency
             yerr = grouped['e2e_p99_std'].fillna(0) if grouped['e2e_p99_std'].notna().any() else None
             ax3.bar(x, grouped['e2e_p99_mean'], width,
                    yerr=yerr,
                    capsize=5, alpha=0.7, color='coral')
-            ax3.set_xlabel('Configuration (processes × streams/proc)')
-            ax3.set_ylabel('E2E P99 Latency (ms)')
-            ax3.set_title('(c) P99 Latency vs Process Configuration')
+            ax3.set_xlabel('Configuration (processes × streams/proc)', fontsize=11)
+            ax3.set_ylabel('Global E2E P99 Latency (ms)', fontsize=11)
+            ax3.set_title('(c) Global P99 Latency vs Configuration', fontsize=12, fontweight='bold')
             ax3.set_xticks(x)
             ax3.set_xticklabels(grouped['config'])
             ax3.grid(True, alpha=0.3, axis='y')
 
+            # Subplot 4: Worst-Tenant P99 Latency
+            yerr = grouped['per_proc_p99_std'].fillna(0) if grouped['per_proc_p99_std'].notna().any() else None
+            ax4.bar(x, grouped['per_proc_p99_mean'], width,
+                   yerr=yerr,
+                   capsize=5, alpha=0.7, color='orchid')
+            ax4.set_xlabel('Configuration (processes × streams/proc)', fontsize=11)
+            ax4.set_ylabel('Worst-Tenant P99 Latency (ms)', fontsize=11)
+            ax4.set_title('(d) Worst-Tenant P99 vs Configuration', fontsize=12, fontweight='bold')
+            ax4.set_xticks(x)
+            ax4.set_xticklabels(grouped['config'])
+            ax4.grid(True, alpha=0.3, axis='y')
+
             fig.suptitle('RQ9: Multi-Process vs Single-Process Scheduling', fontsize=16, fontweight='bold')
+            plt.tight_layout()
             self.save_figure('rq9_multiprocess')
         else:
             print("    Warning: No data found for RQ9")

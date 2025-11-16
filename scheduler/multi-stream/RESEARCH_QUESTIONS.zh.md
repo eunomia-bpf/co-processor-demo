@@ -528,7 +528,7 @@ preempt_latency = hi_blocked['start_time_ms'] - hi_blocked['enqueue_time_ms']
 
 ---
 
-### Sub‑RQ5.2：Per‑stream P99 延迟（load imbalance 场景）
+### Sub‑RQ6.2：Per‑stream P99 延迟（load imbalance 场景）
 
 **问题**：在 load imbalance 场景下，不同 stream 的 tail latency 差异有多夸张？
 **配置**：
@@ -546,7 +546,7 @@ preempt_latency = hi_blocked['start_time_ms'] - hi_blocked['enqueue_time_ms']
 
 ---
 
-### Sub‑RQ5.3：并发 & throughput 在 heterogeneity 下的变化
+### Sub‑RQ6.3：并发 & throughput 在 heterogeneity 下的变化
 
 **问题**：不同 stream 跑不同 kernel type 时，整体 concurrency 与 throughput 如何变化？
 **配置**：
@@ -566,11 +566,11 @@ preempt_latency = hi_blocked['start_time_ms'] - hi_blocked['enqueue_time_ms']
 
 ---
 
-## RQ6：到达过程与 jitter 对系统行为的影响（Arrival Pattern & Jitter）
+## RQ7：到达过程与 jitter 对系统行为的影响（Arrival Pattern & Jitter）
 
 你已经用 `launch_frequency_per_stream` + `random_seed` + jitter 实现了 pseudo‑Poisson 到达。
 
-### Sub‑RQ6.1：`concurrent_rate` vs jitter（固定平均频率）
+### Sub‑RQ7.1：`concurrent_rate` vs jitter（固定平均频率）
 
 **问题**：在相同平均 arrival rate 下，引入 jitter 会让实际并发时间比例发生什么变化？
 **配置**：
@@ -592,10 +592,10 @@ preempt_latency = hi_blocked['start_time_ms'] - hi_blocked['enqueue_time_ms']
 
 ---
 
-### Sub‑RQ6.2：E2E P99 vs jitter（固定平均频率）
+### Sub‑RQ7.2：E2E P99 vs jitter（固定平均频率）
 
 **问题**：在相同平均 load 下，arrival jitter 对 tail latency 的影响是多少？
-**配置**：同 6.1。
+**配置**：同 7.1。
 
 **图**：
 
@@ -607,7 +607,7 @@ preempt_latency = hi_blocked['start_time_ms'] - hi_blocked['enqueue_time_ms']
 
 ---
 
-## RQ7：工作集 vs L2 cache 边界（Memory Working Set & Caching）
+## RQ8：工作集 vs L2 cache 边界（Memory Working Set & Caching）
 
 你已经在 metrics 里算了：
 
@@ -615,9 +615,9 @@ preempt_latency = hi_blocked['start_time_ms'] - hi_blocked['enqueue_time_ms']
 * `l2_cache_mb`
 * `fits_in_l2`（bool）
 
-虽然估算比较粗，但完全可以支撑一个“系数”层面的分析。
+虽然估算比较粗，但完全可以支撑一个"系数"层面的分析。
 
-### Sub‑RQ7.1：`throughput` / `util` vs working_set/L2 ratio
+### Sub‑RQ8.1：`throughput` / `util` vs working_set/L2 ratio
 
 **问题**：工作集大小是否跨过 L2 容量会显著改变 throughput / 利用率 / 并发度？
 **配置**：
@@ -641,7 +641,7 @@ OSDI 级 story：
 
 ---
 
-## 额外：多进程 / 多租户（基于当前输出能做到的）
+## RQ9：多进程 / 多租户（Multi-Process vs Single-Process）
 
 虽然你 C++ 里还没显式 `tenant_id` 字段，但 **raw CSV 里有 host 时间戳**，所以你可以通过：
 
@@ -651,7 +651,7 @@ OSDI 级 story：
 
 可以做一些 multi‑process sub‑RQ（如果你真想对齐 REEF / Gandiva 那类工作）：
 
-### Sub‑RQ8.1：单进程多 stream vs 多进程少 stream（公平性&并发）
+### Sub‑RQ9.1：单进程多 stream vs 多进程少 stream（公平性&并发）
 
 **问题**：相同总 stream 数下，single‑process 多 stream 和 multi‑process（每进程少量 stream）在 concurrency、公平性上的差异？
 **配置**：
@@ -710,24 +710,31 @@ OSDI 级 story：
   * 4.3 fast kernels P99 (single / no‑prio / prio)
   * 4.4 Jain fairness vs priority pattern
 
-* **RQ5：Heterogeneity & imbalance**
+* **RQ5：Preemption latency**
 
-  * 5.1 Jain index vs load imbalance
-  * 5.2 per-stream P99 bar chart
-  * 5.3 throughput/concurrency in homogeneous vs heterogeneous
+  * 5.1 preemption latency vs background kernel duration
+  * 5.2 preemption latency vs offered load
+  * 5.3 preemption latency CDF (small vs large background kernels)
+  * 5.4 preemption latency CDF (low vs high offered load)
 
-* **RQ6：Arrival pattern & jitter**
+* **RQ6：Heterogeneity & imbalance**
 
-  * 6.1 concurrent_rate vs jitter
-  * 6.2 e2e P99 vs jitter
+  * 6.1 Jain index vs load imbalance
+  * 6.2 per-stream P99 bar chart
+  * 6.3 throughput/concurrency in homogeneous vs heterogeneous
 
-* **RQ7：Working set vs L2**
+* **RQ7：Arrival pattern & jitter**
 
-  * 7.1 throughput/util vs working_set/L2 ratio
+  * 7.1 concurrent_rate vs jitter
+  * 7.2 e2e P99 vs jitter
 
-* **（可选）RQ8：Multi-process vs single-process**
+* **RQ8：Working set vs L2**
 
-  * 8.1 fairness/throughput vs process count（offline merge）
+  * 8.1 throughput/util vs working_set/L2 ratio
+
+* **RQ9：Multi-process vs single-process**
+
+  * 9.1 fairness/throughput vs process count（offline merge）
 
 每个 sub‑RQ 都有明确：
 
