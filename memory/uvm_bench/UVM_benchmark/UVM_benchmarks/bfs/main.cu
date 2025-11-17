@@ -255,9 +255,9 @@ void runCudaScanBfs(int startVertex, Graph &G, std::vector<int> &distance,
 
 int main(int argc, char **argv) {
 
-    // read graph from standard input
+    // read graph from standard input or use defaults
     Graph G;
-    int startVertex = atoi(argv[1]);
+    int startVertex = (argc > 1) ? atoi(argv[1]) : 0;
     readGraph(G, argc, argv);
 
     printf("Number of vertices %d\n", G.numVertices);

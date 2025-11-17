@@ -5,9 +5,16 @@ void readGraph(Graph &G, int argc, char **argv) {
     int n;
     int m;
 
-    //If no arguments then read graph from stdin
-    bool fromStdin = argc <= 2;
-    if (fromStdin) {
+    //If no arguments then use defaults, if 2-3 args read from stdin, if 4 args generate random
+    bool fromStdin = (argc == 3);
+    bool useDefaults = (argc < 3);
+
+    if (useDefaults) {
+        // Use default small graph for testing
+        srand(12345);
+        n = 1000;
+        m = 5000;
+    } else if (fromStdin) {
         scanf("%d %d", &n, &m);
     } else {
         srand(12345);
@@ -22,6 +29,7 @@ void readGraph(Graph &G, int argc, char **argv) {
             scanf("%d %d", &u, &v);
             adjecancyLists[u].push_back(v);
         } else {
+            // Generate random graph for defaults or command-line specified size
             u = rand() % n;
             v = rand() % n;
             adjecancyLists[u].push_back(v);

@@ -13,6 +13,8 @@
 #include "backprop.h"
 #include <math.h>
 #include <cuda.h>
+#include <fcntl.h>
+#include <unistd.h>
 //#define OPEN
 
 #define ABS(x)          (((x) > 0.0) ? (x) : (-(x)))
@@ -99,7 +101,7 @@ float **alloc_2d_dbl(int m,  int n)
 }
 
 
-bpnn_randomize_weights(float **w, int m, int n)
+void bpnn_randomize_weights(float **w, int m, int n)
 {
   int i, j;
 
@@ -111,7 +113,7 @@ bpnn_randomize_weights(float **w, int m, int n)
   }
 }
 
-bpnn_randomize_row(float *w, int m)
+void bpnn_randomize_row(float *w, int m)
 {
 	int i;
 	for (i = 0; i <= m; i++) {
@@ -121,7 +123,7 @@ bpnn_randomize_row(float *w, int m)
 }
 
 
-bpnn_zero_weights(float **w, int m,  int n)
+void bpnn_zero_weights(float **w, int m,  int n)
 {
   int i, j;
 
@@ -133,7 +135,7 @@ bpnn_zero_weights(float **w, int m,  int n)
 }
 
 
-void bpnn_initialize(seed)
+void bpnn_initialize(int seed)
 {
   printf("Random number generator seed: %d\n", seed);
   srand(seed);
@@ -301,7 +303,7 @@ void bpnn_hidden_error(float *delta_h,
 }
 
 
-void bpnn_adjust_weights(float *delta, float *ndelta, float *ly, float *nly, float **w, float **oldw)
+void bpnn_adjust_weights(float *delta, int ndelta, float *ly, int nly, float **w, float **oldw)
 // float *delta, *ly, **w, **oldw;
 {
   float new_dw;
@@ -315,8 +317,8 @@ void bpnn_adjust_weights(float *delta, float *ndelta, float *ly, float *nly, flo
   #pragma omp parallel for  \
       shared(oldw, w, delta) \
 	  private(j, k, new_dw) \
-	  firstprivate(ndelta, nly, momentum) 
-#endif 
+	  firstprivate(ndelta, nly, momentum)
+#endif
   for (j = 1; j <= ndelta; j++) {
     for (k = 0; k <= nly; k++) {
       new_dw = ((ETA * delta[j] * ly[k]) + (MOMENTUM * oldw[k][j]));

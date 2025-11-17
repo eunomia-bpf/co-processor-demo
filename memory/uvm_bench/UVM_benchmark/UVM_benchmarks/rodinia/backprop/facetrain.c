@@ -9,9 +9,12 @@
 extern char *strcpy();
 extern void exit();
 
+extern void bpnn_train_cuda(BPNN *net, float *eo, float *eh);
+extern void load(BPNN *net);
+
 int layer_size = 0;
 
-backprop_face()
+void backprop_face()
 {
   BPNN *net;
   int i;
@@ -27,9 +30,7 @@ backprop_face()
   printf("Training done\n");
 }
 
-int setup(argc, argv)
-int argc;
-char *argv[];
+int setup(int argc, char *argv[])
 {
 	
   int seed;

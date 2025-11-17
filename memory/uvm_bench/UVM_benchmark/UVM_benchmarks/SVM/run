@@ -1,8 +1,9 @@
 #!/bin/bash
-# SVM requires data files in ../../data/SVM/
-if [ -f ../../data/SVM/training_data.txt ]; then
-    ./svm ../../data/SVM/training_data.txt
-else
-    echo "SVM data not found. Please check ../../data/SVM/"
-    exit 1
-fi
+# SVM requires 3 arguments: C (int), M (int), ACCURACY (float)
+# Default values based on typical SVM training
+C=${1:-100}
+M=${2:-1000}
+ACCURACY=${3:-0.001}
+
+echo "Running SVM with C=$C, M=$M, ACCURACY=$ACCURACY"
+./svm_uvm $C $M $ACCURACY

@@ -96,6 +96,12 @@ void print_results(int *group, float *mu_x, float *mu_y, int n, int k,char* argv
 
 int main(int argc,char* argv[]){
 
+  if (argc < 3) {
+    printf("Usage: %s <iterations> <datafile>\n", argc > 0 ? argv[0] : "kmeans_cuda");
+    printf("No arguments provided, exiting.\n");
+    return 1;
+  }
+
   /* cpu variables */
   int n; /* number of points */
   int k; /* number of clusters */
