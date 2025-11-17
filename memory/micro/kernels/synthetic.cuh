@@ -227,11 +227,14 @@ __global__ void rand_chunk_kernel(const float* input, float* output,
         size_t chunk_size = chunk_end - chunk_start;
         size_t pages_in_chunk = (chunk_size + elems_per_page - 1) / elems_per_page;
 
-        // Access pages in RANDOM order (this is the key difference!)
-        // For page-stride: access every page once, but in random order
+        // Access pages in RANDOM order (permutation-based, no duplicates)
+        // Use multiplicative congruential permutation to visit each page exactly once
+        seed = lcg_random(seed);
+        size_t step = (seed | 1u);  // Ensure odd number (coprime with any power of 2)
+        size_t offset = lcg_random(seed ^ 0xDEADBEEF) % pages_in_chunk;
+
         for (size_t p = 0; p < pages_in_chunk; ++p) {
-            seed = lcg_random(seed);
-            size_t random_page = seed % pages_in_chunk;  // Random page within chunk
+            size_t random_page = (offset + p * step) % pages_in_chunk;
             size_t page_start = chunk_start + (random_page * elems_per_page);
 
             if (page_start >= N) continue;
@@ -461,12 +464,20 @@ inline void run_pointer_chase(size_t total_working_set, const std::string& mode,
 
     time_kernel(launch, /*warmup=*/2, iterations, runtimes, result);
 
-    // Calculate bytes accessed: total_chunks * nodes_per_chunk * chase_steps accesses
-    size_t total_accesses = (size_t)total_chunks * nodes_per_chunk * chase_steps;
-    size_t total_pages = (n_alloc * sizeof(Node) + 4095) / 4096;
+    // Calculate bytes accessed based on actual logical accesses
+    // Each thread accesses chase_steps nodes
+    size_t logical_accesses = (size_t)total_chunks * chunks_per_thread * chase_steps;
+    size_t logical_bytes = logical_accesses * sizeof(Node);
 
-    // For pointer chase, we access pages during traversal
-    result.bytes_accessed = total_pages * 4096;
+    // Estimate pages touched (logical bytes / page size)
+    size_t pages_touched = (logical_bytes + 4095) / 4096;
+
+    // Upper bound: cannot exceed total pages in nodes array
+    size_t total_pages = (n_alloc * sizeof(Node) + 4095) / 4096;
+    pages_touched = std::min(pages_touched, total_pages);
+
+    // For UVM, migration granularity is page-level
+    result.bytes_accessed = pages_touched * 4096;
 
     // Cleanup
     CUDA_CHECK(cudaFree(nodes));

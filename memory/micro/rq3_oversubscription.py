@@ -20,8 +20,9 @@ import sys
 KERNELS = ['seq_stream', 'rand_stream', 'pointer_chase']
 MODES   = ['device', 'uvm']
 
-# Unified size factors (keep runtime reasonable - max 1.25x)
-SIZE_FACTORS = [0.5, 0.75, 1.0, 1.25]
+# Unified size factors (extended to 1.5x for complete oversub characterization)
+SIZE_FACTORS = [0.5, 0.75, 1.0, 1.25, 1.5]
+BASELINE_SF = 0.5  # Baseline for normalization
 
 STRIDE_BYTES = 4096   # page-level for ALL kernels (fair comparison)
 ITERATIONS   = 3      # reduced for faster execution
@@ -133,13 +134,13 @@ def plot_results(df):
 
         # Plot 2: Normalized throughput vs size_factor
         base_device = kdf[(kdf['mode'] == 'device') &
-                          (kdf['size_factor'] == 0.25)]
+                          (kdf['size_factor'] == BASELINE_SF)]
 
         if not base_device.empty:
             baseline_bw = base_device['bw_GBps'].values[0]
 
             for mode in MODES:
-                mdf = kdf[kdf['mode'] == mode]
+                mdf = kdf[kdf['mode'] == mode].sort_values('size_factor')
                 if mdf.empty:
                     continue
                 norm = mdf['bw_GBps'] / baseline_bw
@@ -151,7 +152,7 @@ def plot_results(df):
                           linewidth=1.0, alpha=0.5)
 
         ax_bw.set_xlabel('Size Factor (× GPU Memory)', fontsize=11)
-        ax_bw.set_ylabel('Normalized Throughput\n(vs Device @ 0.25x)', fontsize=11)
+        ax_bw.set_ylabel(f'Normalized Throughput\n(vs Device @ {BASELINE_SF}x)', fontsize=11)
         ax_bw.set_title(f'{kernel_display[kernel]} – Throughput',
                         fontsize=12, fontweight='bold')
         ax_bw.axvline(1.0, color='red', linestyle='--',
