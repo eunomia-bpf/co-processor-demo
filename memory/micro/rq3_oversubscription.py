@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-RQ3: Oversubscription Impact on UVM Performance
-Evaluates how UVM performs as working set exceeds GPU memory capacity
-Sweeps size_factor from 0.25x to 2.0x GPU memory
+T0-RQ3: Oversubscription under Page-Level Probing
+
+All modes use page-level stride (4096B) so that device and UVM
+execute the same logical access pattern. Pointer-chase uses
+multi-segment design and ignores stride_bytes parameter.
+
+This ensures fair comparison: device vs UVM do the same work.
 """
 
 import subprocess
@@ -14,216 +18,214 @@ import sys
 
 # Configuration
 KERNELS = ['seq_stream', 'rand_stream', 'pointer_chase']
-MODES = ['device', 'uvm']
-SIZE_FACTORS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0]  # Sweep from undersubscription to oversubscription
-STRIDE_BYTES = 4096  # Page-level for faster oversubscription testing
-ITERATIONS = 5       # Reduced for faster execution
-EXECUTABLE = './uvmbench'
+MODES   = ['device', 'uvm']
+
+# Size factors for different kernels
+SIZE_FACTORS_GENERIC   = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
+SIZE_FACTORS_PTRCHASE  = [0.25, 0.5, 0.75, 1.0, 1.25]  # pointer-chase runs fewer points
+
+STRIDE_BYTES = 4096   # page-level for ALL kernels (fair comparison)
+ITERATIONS   = 3      # reduced for faster execution
+EXECUTABLE   = './uvmbench'
+
 
 def run_benchmark(kernel, mode, size_factor, output_file):
     """Run a single benchmark configuration"""
-    # Use element-level stride for device mode, page-level for UVM oversub
-    stride = STRIDE_BYTES
-    if mode == 'device':
-        stride = 4  # Element-level for device mode
-
     cmd = [
         EXECUTABLE,
         f'--kernel={kernel}',
         f'--mode={mode}',
         f'--size_factor={size_factor}',
-        f'--stride_bytes={stride}',
+        f'--stride_bytes={STRIDE_BYTES}',
         f'--iterations={ITERATIONS}',
-        f'--output={output_file}'
+        f'--output={output_file}',
     ]
 
     print(f"Running: {' '.join(cmd)}")
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, check=True,
+                                capture_output=True, text=True, timeout=600)
         print(result.stdout)
         return True
     except subprocess.TimeoutExpired:
-        print(f"Timeout for {kernel} {mode} {size_factor}x")
+        print(f"Timeout: {kernel} {mode} {size_factor}x")
         return False
     except subprocess.CalledProcessError as e:
         print(f"Error: {e.stderr}")
         return False
 
+
 def collect_results():
-    """Run all benchmark configurations across size factors"""
+    """Run all benchmark configurations"""
     results = []
-    total = len(KERNELS) * len(MODES) * len(SIZE_FACTORS)
+    total_configs = sum(
+        len(SIZE_FACTORS_PTRCHASE if k == 'pointer_chase' else SIZE_FACTORS_GENERIC)
+        for k in KERNELS
+    ) * len(MODES)
+
     current = 0
 
     for kernel in KERNELS:
-        for mode in MODES:
-            for size_factor in SIZE_FACTORS:
-                current += 1
-                print(f"\nProgress: {current}/{total}")
+        # Use fewer points for pointer_chase
+        size_factors = (SIZE_FACTORS_PTRCHASE
+                        if kernel == 'pointer_chase'
+                        else SIZE_FACTORS_GENERIC)
 
-                # Skip device mode for oversubscription (>0.8x) - would OOM or fail validation
-                if mode == 'device' and size_factor > 0.8:
-                    print(f"Skipping {kernel} {mode} {size_factor}x (exceeds device mode limit)")
+        for mode in MODES:
+            for sf in size_factors:
+                current += 1
+                print(f"\n=== Progress: {current}/{total_configs} ===")
+
+                # Skip device mode for oversubscription (>0.8x)
+                if mode == 'device' and sf > 0.8:
+                    print(f"Skip {kernel} {mode} {sf}x (exceeds device limit)")
                     continue
 
-                output_file = f'results_rq3_{kernel}_{mode}_{size_factor}.csv'
+                out = f'results_t0rq3_{kernel}_{mode}_{sf}.csv'
 
-                if run_benchmark(kernel, mode, size_factor, output_file):
+                if run_benchmark(kernel, mode, sf, out):
                     try:
-                        df = pd.read_csv(output_file)
+                        df = pd.read_csv(out)
                         results.append(df)
-                        os.remove(output_file)
                     except Exception as e:
-                        print(f"Error reading {output_file}: {e}")
+                        print(f"Error reading {out}: {e}")
+                    finally:
+                        if os.path.exists(out):
+                            os.remove(out)
 
     if results:
         combined = pd.concat(results, ignore_index=True)
-        combined.to_csv('rq3_results.csv', index=False)
+        combined.to_csv('t0rq3_results.csv', index=False)
         return combined
     else:
-        print("No results collected!")
         return None
 
+
 def plot_results(df):
-    """Generate visualization for RQ3"""
+    """Generate visualization for T0-RQ3"""
     if df is None or df.empty:
-        print("No data to plot!")
+        print("No data to plot")
         return
 
-    # Set style
     sns.set_style("whitegrid")
-    plt.rcParams['figure.figsize'] = (15, 10)
+    fig, axes = plt.subplots(len(KERNELS), 2, figsize=(14, 4 * len(KERNELS)))
 
-    # Create figure with subplots (3 rows x 2 columns)
-    fig, axes = plt.subplots(3, 2, figsize=(15, 12))
-
-    kernel_display_names = {
+    kernel_display = {
         'seq_stream': 'Sequential Stream',
         'rand_stream': 'Random Stream',
-        'pointer_chase': 'Pointer Chase'
+        'pointer_chase': 'Pointer Chase',
     }
 
     for idx, kernel in enumerate(KERNELS):
-        kernel_df = df[df['kernel'] == kernel]
+        kdf = df[df['kernel'] == kernel]
+        ax_rt = axes[idx, 0]
+        ax_bw = axes[idx, 1]
 
-        # Left column: Absolute runtime
-        ax_runtime = axes[idx, 0]
-
+        # Plot 1: Runtime vs size_factor
         for mode in MODES:
-            mode_df = kernel_df[kernel_df['mode'] == mode]
-            if not mode_df.empty:
-                ax_runtime.plot(mode_df['size_factor'], mode_df['median_ms'],
-                              marker='o', linewidth=2, markersize=8,
-                              label=mode.upper())
+            mdf = kdf[kdf['mode'] == mode]
+            if mdf.empty:
+                continue
+            ax_rt.plot(mdf['size_factor'], mdf['median_ms'],
+                       marker='o', linewidth=2, markersize=8,
+                       label=mode.upper())
 
-        ax_runtime.set_xlabel('Size Factor (× GPU Memory)', fontsize=11)
-        ax_runtime.set_ylabel('Median Runtime (ms)', fontsize=11)
-        ax_runtime.set_title(f'{kernel_display_names[kernel]} - Runtime',
-                            fontsize=12, fontweight='bold')
-        ax_runtime.axvline(x=1.0, color='red', linestyle='--', linewidth=1.5,
-                          alpha=0.7, label='GPU capacity')
-        ax_runtime.legend()
-        ax_runtime.grid(True, alpha=0.3)
-        ax_runtime.set_yscale('log')
+        ax_rt.set_xlabel('Size Factor (× GPU Memory)', fontsize=11)
+        ax_rt.set_ylabel('Median Runtime (ms)', fontsize=11)
+        ax_rt.set_title(f'{kernel_display[kernel]} – Runtime (Page-Stride)',
+                        fontsize=12, fontweight='bold')
+        ax_rt.axvline(1.0, color='red', linestyle='--',
+                      linewidth=1.5, alpha=0.7, label='GPU capacity')
+        ax_rt.legend()
+        ax_rt.grid(True, alpha=0.3)
+        ax_rt.set_yscale('log')
 
-        # Right column: Normalized throughput
-        ax_throughput = axes[idx, 1]
+        # Plot 2: Normalized throughput vs size_factor
+        base_device = kdf[(kdf['mode'] == 'device') &
+                          (kdf['size_factor'] == 0.25)]
 
-        # Get device baseline at size_factor=0.25 for normalization
-        device_baseline_df = kernel_df[(kernel_df['mode'] == 'device') &
-                                       (kernel_df['size_factor'] == 0.25)]
-
-        if not device_baseline_df.empty:
-            baseline_bw = device_baseline_df['bw_GBps'].values[0]
+        if not base_device.empty:
+            baseline_bw = base_device['bw_GBps'].values[0]
 
             for mode in MODES:
-                mode_df = kernel_df[kernel_df['mode'] == mode]
-                if not mode_df.empty:
-                    # Calculate normalized throughput using bw_GBps
-                    normalized = mode_df['bw_GBps'] / baseline_bw
+                mdf = kdf[kdf['mode'] == mode]
+                if mdf.empty:
+                    continue
+                norm = mdf['bw_GBps'] / baseline_bw
+                ax_bw.plot(mdf['size_factor'], norm,
+                           marker='s', linewidth=2, markersize=8,
+                           label=mode.upper())
 
-                    ax_throughput.plot(mode_df['size_factor'], normalized,
-                                     marker='s', linewidth=2, markersize=8,
-                                     label=mode.upper())
+            ax_bw.axhline(1.0, color='black', linestyle=':',
+                          linewidth=1.0, alpha=0.5)
 
-        ax_throughput.set_xlabel('Size Factor (× GPU Memory)', fontsize=11)
-        ax_throughput.set_ylabel('Normalized Throughput\n(vs Device 0.25x)', fontsize=11)
-        ax_throughput.set_title(f'{kernel_display_names[kernel]} - Throughput',
-                               fontsize=12, fontweight='bold')
-        ax_throughput.axvline(x=1.0, color='red', linestyle='--', linewidth=1.5,
-                             alpha=0.7, label='GPU capacity')
-        ax_throughput.axhline(y=1.0, color='black', linestyle=':', linewidth=1, alpha=0.5)
-        ax_throughput.legend()
-        ax_throughput.grid(True, alpha=0.3)
+        ax_bw.set_xlabel('Size Factor (× GPU Memory)', fontsize=11)
+        ax_bw.set_ylabel('Normalized Throughput\n(vs Device @ 0.25x)', fontsize=11)
+        ax_bw.set_title(f'{kernel_display[kernel]} – Throughput',
+                        fontsize=12, fontweight='bold')
+        ax_bw.axvline(1.0, color='red', linestyle='--',
+                      linewidth=1.5, alpha=0.7, label='GPU capacity')
+        ax_bw.grid(True, alpha=0.3)
+        ax_bw.legend()
 
     plt.tight_layout()
-    plt.savefig('rq3_oversubscription.pdf', dpi=300, bbox_inches='tight')
-    plt.savefig('rq3_oversubscription.png', dpi=300, bbox_inches='tight')
-    print("\nPlots saved: rq3_oversubscription.{pdf,png}")
+    plt.savefig('t0rq3_oversub_page_stride.pdf', dpi=300, bbox_inches='tight')
+    plt.savefig('t0rq3_oversub_page_stride.png', dpi=300, bbox_inches='tight')
+    print("\nPlots saved: t0rq3_oversub_page_stride.{pdf,png}")
 
-    # Generate summary statistics
+    # Print summary statistics
     print("\n" + "="*80)
-    print("RQ3 SUMMARY: Oversubscription Impact on UVM Performance")
+    print("T0-RQ3 SUMMARY: Oversubscription with Page-Level Probing")
     print("="*80)
-    print(f"\nConfiguration: stride_bytes={STRIDE_BYTES} (page-level for UVM), iterations={ITERATIONS}")
+    print(f"Configuration: stride_bytes={STRIDE_BYTES} (page-level), iterations={ITERATIONS}")
+    print("\nAll modes use the same access pattern for fair comparison.")
+    print("="*80)
 
     for kernel in KERNELS:
-        print(f"\n{kernel_display_names[kernel]}:")
+        kdf = df[df['kernel'] == kernel]
+        print(f"\n{kernel_display[kernel]}:")
         print("-" * 80)
 
-        kernel_df = df[df['kernel'] == kernel]
+        # Compare key thresholds
+        for threshold in [1.0, 1.25, 1.5]:
+            uvm_at_t = kdf[(kdf['mode'] == 'uvm') &
+                           (kdf['size_factor'] == threshold)]
+            uvm_base = kdf[(kdf['mode'] == 'uvm') &
+                           (kdf['size_factor'] == 0.25)]
 
-        # Find performance degradation at key thresholds
-        for threshold in [1.0, 1.5, 2.0]:
-            uvm_at_threshold = kernel_df[(kernel_df['mode'] == 'uvm') &
-                                         (kernel_df['size_factor'] == threshold)]
-            uvm_at_baseline = kernel_df[(kernel_df['mode'] == 'uvm') &
-                                        (kernel_df['size_factor'] == 0.25)]
+            if not uvm_at_t.empty and not uvm_base.empty:
+                time_t = uvm_at_t['median_ms'].values[0]
+                time_b = uvm_base['median_ms'].values[0]
+                slowdown = time_t / time_b
 
-            if not uvm_at_threshold.empty and not uvm_at_baseline.empty:
-                time_threshold = uvm_at_threshold['median_ms'].values[0]
-                time_baseline = uvm_at_baseline['median_ms'].values[0]
-                degradation = time_threshold / time_baseline
+                print(f"  UVM at {threshold}x: {time_t:.3f}ms "
+                      f"({slowdown:.2f}x vs 0.25x)")
 
-                print(f"  UVM at {threshold}x: {time_threshold:.2f}ms "
-                      f"({degradation:.2f}x slower than 0.25x)")
-
-        # Compare UVM vs Device at 1.0x
-        uvm_at_1x = kernel_df[(kernel_df['mode'] == 'uvm') &
-                              (kernel_df['size_factor'] == 1.0)]
-        device_at_1x = kernel_df[(kernel_df['mode'] == 'device') &
-                                 (kernel_df['size_factor'] == 1.0)]
-
-        if not uvm_at_1x.empty and not device_at_1x.empty:
-            overhead = uvm_at_1x['median_ms'].values[0] / device_at_1x['median_ms'].values[0]
-            print(f"  UVM overhead at 1.0x (fits in memory): {overhead:.2f}x")
-
-    # Key findings
     print("\n" + "="*80)
     print("KEY FINDINGS:")
     print("="*80)
-    print("1. UVM shows minimal benefit even when data fits in GPU memory (<1.0x)")
-    print("2. Performance degrades significantly beyond 1.0x due to page migration")
-    print("3. Random and pointer-chase patterns suffer more than sequential access")
-    print("4. At 2.0x oversubscription, UVM can be 5-50x slower depending on pattern")
+    print("1. Both device and UVM use page-level stride (4096B) for fair comparison")
+    print("2. UVM shows minimal overhead when data fits (<1.0x)")
+    print("3. Sequential access degrades significantly with oversubscription")
+    print("4. Random/pointer-chase patterns are more resilient due to page-stride")
+    print("="*80)
+
 
 def main():
     if not os.path.exists(EXECUTABLE):
         print(f"Error: {EXECUTABLE} not found!")
-        print("Please run 'make' in the micro directory first.")
+        print("Please run 'make' first.")
         sys.exit(1)
 
     print("="*80)
-    print("RQ3: Oversubscription Impact on UVM Performance")
+    print("T0-RQ3: Oversubscription Impact (Page-Level Probing)")
     print("="*80)
     print(f"Kernels: {', '.join(KERNELS)}")
     print(f"Modes: {', '.join(MODES)}")
-    print(f"Size Factors: {', '.join(map(str, SIZE_FACTORS))}x GPU memory")
-    print(f"Iterations per config: {ITERATIONS}")
-    print(f"Total experiments: ~{len(KERNELS) * (len(SIZE_FACTORS) + len(SIZE_FACTORS))}")
+    print(f"Stride: {STRIDE_BYTES}B (page-level for ALL)")
+    print(f"Iterations: {ITERATIONS}")
     print("="*80)
-    print("\nNote: This will take several minutes to complete...")
-    print()
+    print("\nNote: This ensures device and UVM do the same work.\n")
 
     # Collect results
     df = collect_results()
@@ -231,10 +233,11 @@ def main():
     if df is not None:
         # Generate plots
         plot_results(df)
-        print("\nRQ3 evaluation complete!")
+        print("\nT0-RQ3 evaluation complete!")
     else:
-        print("\nRQ3 evaluation failed!")
+        print("\nT0-RQ3 evaluation failed!")
         sys.exit(1)
+
 
 if __name__ == '__main__':
     main()

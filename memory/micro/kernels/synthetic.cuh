@@ -308,59 +308,86 @@ struct Node {
     float padding[1];   // Align to 16 bytes
 };
 
-__global__ void pointer_chase_kernel(const Node* nodes, float* result, size_t n, int steps) {
-    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+// GPU-based node initialization (faster than CPU for large arrays)
+__device__ __forceinline__
+unsigned int lcg_hash(unsigned int x) {
+    return 1664525u * x + 1013904223u;
+}
+
+__global__ void init_nodes_kernel(Node* nodes, size_t n) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     size_t stride = gridDim.x * blockDim.x;
 
-    // Grid-stride loop to ensure full coverage of all nodes
-    for (size_t i = tid; i < n; i += stride) {
-        unsigned int current = i;
-        float sum = 0.0f;
+    for (size_t i = idx; i < n; i += stride) {
+        unsigned int r = lcg_hash(static_cast<unsigned int>(i));
+        nodes[i].next = r % n;
+        nodes[i].data = 1.0f;
+        nodes[i].padding[0] = 0.0f;
+    }
+}
 
-        // Chase pointers for 'steps' iterations
-        for (int s = 0; s < steps; ++s) {
-            sum += nodes[current].data;
-            current = nodes[current].next;
+// Multi-segment pointer chase kernel for oversubscription testing
+// stride_elems: sample every Nth node (for page-level testing)
+__global__ void pointer_chase_kernel_segmented(const Node* nodes, float* result,
+                                                size_t n_per_seg, int steps, int segments,
+                                                size_t stride_elems) {
+    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t grid_stride = gridDim.x * blockDim.x;
+
+    // Process each segment
+    for (int seg = 0; seg < segments; ++seg) {
+        size_t base = seg * n_per_seg;
+
+        // Grid-stride loop with sampling
+        for (size_t i = tid * stride_elems; i < n_per_seg; i += grid_stride * stride_elems) {
+            unsigned int current = static_cast<unsigned int>(base + i);
+            float sum = 0.0f;
+
+            // Chase pointers for 'steps' iterations
+            for (int s = 0; s < steps; ++s) {
+                sum += nodes[current].data;
+                current = nodes[current].next;
+            }
+
+            result[base + i] = sum;
         }
-
-        result[i] = sum;
     }
 }
 
 inline void run_pointer_chase(size_t total_working_set, const std::string& mode, size_t stride_bytes,
                        int iterations, std::vector<float>& runtimes, KernelResult& result) {
-    // CRITICAL: Cap pointer_chase size to prevent CPU initialization slowdown
-    // Max 32M nodes (~512MB for nodes + result) - reduced for faster runs
-    const size_t MAX_NODES = 32 * 1024 * 1024;
-    const size_t MAX_WORKING_SET = MAX_NODES * sizeof(Node) + MAX_NODES * sizeof(float);
-    size_t stride_nodes = std::max(1UL, stride_bytes / sizeof(Node));
-
-    if (total_working_set > MAX_WORKING_SET) {
-        total_working_set = MAX_WORKING_SET;
-    }
+    // Multi-segment design for oversubscription:
+    // - Each segment has at most MAX_NODES_PER_SEG nodes
+    // - Total working set is divided into multiple segments
+    // - This allows oversub without huge CPU init cost
+    const size_t MAX_NODES_PER_SEG = 32 * 1024 * 1024;  // 32M nodes per segment
 
     // Split: nodes (90%) + result (10%)
     size_t nodes_bytes = static_cast<size_t>(total_working_set * 0.9);
     size_t result_bytes = static_cast<size_t>(total_working_set * 0.1);
 
-    size_t n = nodes_bytes / sizeof(Node);
-    size_t n_result = result_bytes / sizeof(float);
-    n = std::min(n, n_result);  // Ensure consistency
+    // Calculate total nodes needed
+    size_t total_nodes = nodes_bytes / sizeof(Node);
 
-    // Ensure n doesn't overflow unsigned int
-    if (n > std::numeric_limits<unsigned int>::max() / 2) {
-        n = std::numeric_limits<unsigned int>::max() / 2;
-    }
+    // Determine segments - limit to max 16 segments for reasonable runtime
+    size_t n_per_seg = std::min(total_nodes, MAX_NODES_PER_SEG);
+    int segments = static_cast<int>((total_nodes + n_per_seg - 1) / n_per_seg);
+    segments = std::min(segments, 16);  // Cap at 16 segments to keep runtime manageable
 
-    nodes_bytes = n * sizeof(Node);
-    result_bytes = n * sizeof(float);
+    // Actual allocation (may be slightly larger due to rounding up)
+    size_t n_alloc = static_cast<size_t>(segments) * n_per_seg;
+    nodes_bytes = n_alloc * sizeof(Node);
+    result_bytes = n_alloc * sizeof(float);
+
+    // Calculate stride in elements (how many nodes per page to sample)
+    size_t stride_elems = std::max(1UL, stride_bytes / sizeof(Node));
 
     // Sanity check for device mode
     if (mode == "device") {
         size_t free_bytes, total_bytes;
         CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
         if (nodes_bytes + result_bytes > free_bytes * 0.8) {
-            throw std::runtime_error("Working set too large for device memory! Use smaller size_factor for pointer_chase");
+            throw std::runtime_error("pointer_chase working set too large for device mode");
         }
     }
 
@@ -376,26 +403,13 @@ inline void run_pointer_chase(size_t total_working_set, const std::string& mode,
         CUDA_CHECK(cudaMallocManaged(&result_array, result_bytes));
     }
 
-    // Initialize linked structure (random chain)
-    // Use fast initialization to avoid CPU bottleneck
-    if (mode == "device") {
-        std::vector<Node> host_nodes(n);
-        // Fast parallel-friendly initialization
-        #pragma omp parallel for if(n > 1000000)
-        for (size_t i = 0; i < n; ++i) {
-            host_nodes[i].next = (static_cast<unsigned int>(rand()) ^ i) % n;
-            host_nodes[i].data = 1.0f;
-            host_nodes[i].padding[0] = 0.0f;
-        }
-        CUDA_CHECK(cudaMemcpy(nodes, host_nodes.data(), nodes_bytes, cudaMemcpyHostToDevice));
-    } else {
-        // For UVM, initialize in chunks to avoid long stall
-        for (size_t i = 0; i < n; ++i) {
-            nodes[i].next = (static_cast<unsigned int>(rand()) ^ i) % n;
-            nodes[i].data = 1.0f;
-            nodes[i].padding[0] = 0.0f;
-        }
-    }
+    // Use GPU-based initialization (much faster than CPU for large arrays)
+    int init_blockSize = 256;
+    int init_numBlocks = (n_alloc + init_blockSize - 1) / init_blockSize;
+    init_numBlocks = std::min(init_numBlocks, 2048);
+
+    init_nodes_kernel<<<init_numBlocks, init_blockSize>>>(nodes, n_alloc);
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     // Prefetch to GPU for uvm_prefetch mode
     if (mode == "uvm_prefetch") {
@@ -408,22 +422,29 @@ inline void run_pointer_chase(size_t total_working_set, const std::string& mode,
 
     // Launch configuration
     int blockSize = 256;
-    int numBlocks = (n + blockSize - 1) / blockSize;
+    int numBlocks = (n_per_seg + blockSize - 1) / blockSize;
     numBlocks = std::min(numBlocks, 1024);
-    int chase_steps = 100;  // Number of pointer chases per thread
+    int chase_steps = 4;  // Minimal steps for oversub testing to keep runtime reasonable
 
-    // Use generic timing template
+    // Use generic timing template with multi-segment kernel
     auto launch = [&]() {
-        pointer_chase_kernel<<<numBlocks, blockSize>>>(nodes, result_array, n, chase_steps);
+        pointer_chase_kernel_segmented<<<numBlocks, blockSize>>>(
+            nodes, result_array, n_per_seg, chase_steps, segments, stride_elems);
     };
 
-    time_kernel(launch, /*warmup=*/3, iterations, runtimes, result);
+    time_kernel(launch, /*warmup=*/2, iterations, runtimes, result);
 
-    // Calculate bytes accessed: with grid-stride loop, all n nodes are accessed
-    // Each node is read chase_steps times
-    // Note: pointer_chase always uses grid-stride to cover all nodes regardless of stride_bytes
-    result.bytes_accessed = n * chase_steps * sizeof(Node);
-    (void)stride_nodes;  // Unused for pointer_chase
+    // Calculate bytes accessed accounting for stride sampling
+    size_t num_samples_per_seg = (n_per_seg + stride_elems - 1) / stride_elems;
+    size_t total_accesses = static_cast<size_t>(segments) * num_samples_per_seg * chase_steps;
+
+    if (stride_bytes >= 4096) {
+        // Page-level: count UVM migration bytes (each access touches a 4KB page)
+        result.bytes_accessed = total_accesses * 4096;
+    } else {
+        // Element-level: count logical bytes
+        result.bytes_accessed = total_accesses * sizeof(Node);
+    }
 
     // Cleanup
     CUDA_CHECK(cudaFree(nodes));
