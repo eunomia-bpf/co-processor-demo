@@ -72,31 +72,52 @@ inline void time_kernel(LaunchFunc launch_kernel, int warmup_iterations, int tim
 }
 
 // ============================================================================
-// Kernel 1: Sequential Stream (read with light computation)
+// Chunk-based kernel design parameters
+// ============================================================================
+// All kernels use a unified abstraction:
+// - T: active threads (fixed)
+// - chunk_elems: elements per chunk (aligned to pages)
+// - chunks_per_thread: how many chunks each thread handles
+// - stride_bytes: access granularity within chunk (4B or 4KB)
+//
+// Total working set: W ≈ T * chunks_per_thread * chunk_elems * sizeof(type)
 // ============================================================================
 
-__global__ void seq_stream_kernel(const float* input, float* output, size_t n, size_t stride_elems) {
-    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t grid_stride = gridDim.x * blockDim.x;
+// ============================================================================
+// Kernel 1: Sequential - Chunk-sequential stream
+// ============================================================================
+// Goal: Model GEMM/stencil where each thread/warp sequentially scans its tile
+// Each thread handles chunks_per_thread contiguous chunks, accessing them sequentially
 
-    // stride_elems determines granularity:
-    // - stride_elems = 1: access every element (element-level)
-    // - stride_elems = page_size/sizeof(float): access one element per page (page-level)
-    for (size_t page = tid; page * stride_elems < n; page += grid_stride) {
-        size_t i = page * stride_elems;
-        // Sequential read with simple computation
-        float val = input[i];
-        // Light computation to avoid pure memory copy
-        val = val * 1.5f + 2.0f;
-        output[i] = val;
+__global__ void seq_chunk_kernel(const float* input, float* output,
+                                 size_t N,
+                                 size_t chunk_elems,
+                                 int chunks_per_thread,
+                                 size_t stride_elems) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int T = gridDim.x * blockDim.x;
+
+    // Each thread handles chunks_per_thread consecutive chunks
+    for (int c = 0; c < chunks_per_thread; ++c) {
+        size_t chunk_id = (size_t)tid * chunks_per_thread + c;
+        size_t chunk_start = chunk_id * chunk_elems;
+        size_t chunk_end = min(chunk_start + chunk_elems, N);
+
+        // Sequential access within chunk with stride
+        for (size_t i = chunk_start; i < chunk_end; i += stride_elems) {
+            if (i >= N) break;
+            float val = input[i];
+            val = val * 1.5f + 2.0f;  // Light computation
+            output[i] = val;
+        }
     }
 }
 
 inline void run_seq_stream(size_t total_working_set, const std::string& mode, size_t stride_bytes,
-                    int iterations, std::vector<float>& runtimes, KernelResult& result) {
-    // Split working set: input (50%) + output (50%)
+                           int iterations, std::vector<float>& runtimes, KernelResult& result) {
+    // Split: input (50%) + output (50%)
     size_t array_bytes = total_working_set / 2;
-    size_t n = array_bytes / sizeof(float);
+    size_t N = array_bytes / sizeof(float);
     size_t stride_elems = std::max(1UL, stride_bytes / sizeof(float));
 
     // Sanity check for device mode
@@ -104,33 +125,32 @@ inline void run_seq_stream(size_t total_working_set, const std::string& mode, si
         size_t free_bytes, total_bytes;
         CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
         if (total_working_set > free_bytes * 0.8) {
-            throw std::runtime_error("Working set too large for device memory! Use size_factor < 0.8 for device mode");
+            throw std::runtime_error("Working set too large for device mode");
         }
     }
 
     float *input, *output;
 
-    // Allocate memory based on mode
+    // Allocate based on mode
     if (mode == "device") {
         CUDA_CHECK(cudaMalloc(&input, array_bytes));
         CUDA_CHECK(cudaMalloc(&output, array_bytes));
-    } else { // uvm or uvm_prefetch
+    } else {
         CUDA_CHECK(cudaMallocManaged(&input, array_bytes));
         CUDA_CHECK(cudaMallocManaged(&output, array_bytes));
     }
 
-    // Initialize input data
+    // Initialize data
     if (mode == "device") {
-        std::vector<float> host_data(n, 1.0f);
+        std::vector<float> host_data(N, 1.0f);
         CUDA_CHECK(cudaMemcpy(input, host_data.data(), array_bytes, cudaMemcpyHostToDevice));
     } else {
-        // For managed memory, initialize on host
-        for (size_t i = 0; i < n; ++i) {
+        for (size_t i = 0; i < N; ++i) {
             input[i] = 1.0f;
         }
     }
 
-    // Prefetch to GPU for uvm_prefetch mode
+    // Prefetch for uvm_prefetch mode
     if (mode == "uvm_prefetch") {
         int dev;
         CUDA_CHECK(cudaGetDevice(&dev));
@@ -139,32 +159,33 @@ inline void run_seq_stream(size_t total_working_set, const std::string& mode, si
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    // Launch configuration
+    // Chunk-based configuration
+    // Fixed active threads: 8 * #SM * 32 (adjust based on GPU)
     int blockSize = 256;
-    int numBlocks = (n + blockSize - 1) / blockSize;
-    // Cap at reasonable number of blocks
-    numBlocks = std::min(numBlocks, 1024);
+    int numBlocks = 256;  // Total ~64K threads
+    int T = numBlocks * blockSize;
+    int chunks_per_thread = 1;
 
-    // Use generic timing template
+    // Calculate chunk size (aligned to pages)
+    size_t chunk_elems = (N + T * chunks_per_thread - 1) / (T * chunks_per_thread);
+    size_t elems_per_page = 4096 / sizeof(float);
+    chunk_elems = ((chunk_elems + elems_per_page - 1) / elems_per_page) * elems_per_page;
+
     auto launch = [&]() {
-        seq_stream_kernel<<<numBlocks, blockSize>>>(input, output, n, stride_elems);
+        seq_chunk_kernel<<<numBlocks, blockSize>>>(input, output, N, chunk_elems, chunks_per_thread, stride_elems);
     };
 
-    time_kernel(launch, /*warmup=*/3, iterations, runtimes, result);
+    time_kernel(launch, /*warmup=*/2, iterations, runtimes, result);
 
-    // Calculate bytes accessed based on stride
-    // Number of actual accesses = ceil(n / stride_elems)
-    size_t num_accesses = (n + stride_elems - 1) / stride_elems;
-    size_t logical_bytes = num_accesses * sizeof(float) * 2;  // read + write
-
-    // For page-level stride, also calculate effective migration bytes
+    // Calculate bytes accessed
+    size_t num_accesses = (N + stride_elems - 1) / stride_elems;
     if (stride_bytes >= 4096) {
-        // UVM migrates entire pages, so count page-level traffic
+        // Page-level: count UVM migration bytes
         size_t num_pages = num_accesses;
-        result.bytes_accessed = num_pages * 4096 * 2;  // input pages + output pages
+        result.bytes_accessed = num_pages * 4096 * 2;  // input + output
     } else {
-        // Element-level access: use logical bytes
-        result.bytes_accessed = logical_bytes;
+        // Element-level: count logical bytes
+        result.bytes_accessed = num_accesses * sizeof(float) * 2;
     }
 
     // Cleanup
@@ -173,282 +194,283 @@ inline void run_seq_stream(size_t total_working_set, const std::string& mode, si
 }
 
 // ============================================================================
-// Kernel 2: Random Stream (random access pattern)
+// Kernel 2: Random - Per-thread random page tiles
 // ============================================================================
+// Goal: Model gather/scatter or GNN where each thread randomly accesses pages
+// KEY: Randomness is at PAGE LEVEL, not element level
 
-__global__ void rand_stream_kernel(const float* input, float* output,
-                                   const unsigned int* indices, size_t n, size_t stride_elems) {
-    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t grid_stride = gridDim.x * blockDim.x;
+__device__ __forceinline__
+unsigned int lcg_random(unsigned int x) {
+    return 1664525u * x + 1013904223u;
+}
 
-    for (size_t page = tid; page * stride_elems < n; page += grid_stride) {
-        size_t i = page * stride_elems;
-        // Random access via index array
-        unsigned int access_idx = indices[i] % n;
-        float val = input[access_idx];
-        val = val * 1.5f + 2.0f;
-        output[i] = val;
+__global__ void rand_chunk_kernel(const float* input, float* output,
+                                  size_t N,
+                                  size_t chunk_elems,
+                                  int chunks_per_thread,
+                                  size_t stride_elems,
+                                  unsigned int base_seed) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int T = gridDim.x * blockDim.x;
+
+    unsigned int seed = base_seed ^ tid;
+    size_t elems_per_page = 4096 / sizeof(float);
+
+    for (int c = 0; c < chunks_per_thread; ++c) {
+        size_t chunk_id = (size_t)tid * chunks_per_thread + c;
+        size_t chunk_start = chunk_id * chunk_elems;
+        size_t chunk_end = min(chunk_start + chunk_elems, N);
+
+        if (chunk_start >= N) continue;
+
+        // Calculate pages in this chunk
+        size_t chunk_size = chunk_end - chunk_start;
+        size_t pages_in_chunk = (chunk_size + elems_per_page - 1) / elems_per_page;
+
+        // Access pages in RANDOM order (this is the key difference!)
+        // For page-stride: access every page once, but in random order
+        for (size_t p = 0; p < pages_in_chunk; ++p) {
+            seed = lcg_random(seed);
+            size_t random_page = seed % pages_in_chunk;  // Random page within chunk
+            size_t page_start = chunk_start + (random_page * elems_per_page);
+
+            if (page_start >= N) continue;
+
+            // Access one element in this page (page-level probing)
+            size_t i = page_start;
+            float val = input[i];
+            val = val * 1.5f + 2.0f;
+            output[i] = val;
+        }
     }
 }
 
 inline void run_rand_stream(size_t total_working_set, const std::string& mode, size_t stride_bytes,
-                     int iterations, std::vector<float>& runtimes, KernelResult& result) {
-    // Split working set: input (40%) + output (40%) + indices (20%)
-    size_t input_bytes = static_cast<size_t>(total_working_set * 0.4);
-    size_t output_bytes = static_cast<size_t>(total_working_set * 0.4);
-    size_t indices_bytes = static_cast<size_t>(total_working_set * 0.2);
-
-    size_t n = input_bytes / sizeof(float);
-    size_t n_indices = std::min(n, indices_bytes / sizeof(unsigned int));
+                            int iterations, std::vector<float>& runtimes, KernelResult& result) {
+    // Split: input (50%) + output (50%)
+    size_t array_bytes = total_working_set / 2;
+    size_t N = array_bytes / sizeof(float);
     size_t stride_elems = std::max(1UL, stride_bytes / sizeof(float));
-
-    // Limit n to avoid overflow
-    if (n > std::numeric_limits<unsigned int>::max() / 2) {
-        n = std::numeric_limits<unsigned int>::max() / 2;
-    }
-
-    // Ensure n_indices matches n (kernel expects this)
-    n_indices = n;
-    indices_bytes = n * sizeof(unsigned int);
-
-    // Update input/output bytes to match actual n
-    input_bytes = n * sizeof(float);
-    output_bytes = n * sizeof(float);
 
     // Sanity check for device mode
     if (mode == "device") {
         size_t free_bytes, total_bytes;
         CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
         if (total_working_set > free_bytes * 0.8) {
-            throw std::runtime_error("Working set too large for device memory! Use size_factor < 0.8 for device mode");
+            throw std::runtime_error("Working set too large for device mode");
         }
     }
 
     float *input, *output;
-    unsigned int *indices;
 
-    // Allocate memory based on mode
+    // Allocate based on mode
     if (mode == "device") {
-        CUDA_CHECK(cudaMalloc(&input, input_bytes));
-        CUDA_CHECK(cudaMalloc(&output, output_bytes));
-        CUDA_CHECK(cudaMalloc(&indices, indices_bytes));
+        CUDA_CHECK(cudaMalloc(&input, array_bytes));
+        CUDA_CHECK(cudaMalloc(&output, array_bytes));
     } else {
-        CUDA_CHECK(cudaMallocManaged(&input, input_bytes));
-        CUDA_CHECK(cudaMallocManaged(&output, output_bytes));
-        CUDA_CHECK(cudaMallocManaged(&indices, indices_bytes));
+        CUDA_CHECK(cudaMallocManaged(&input, array_bytes));
+        CUDA_CHECK(cudaMallocManaged(&output, array_bytes));
     }
 
     // Initialize data
     if (mode == "device") {
-        std::vector<float> host_input(n, 1.0f);
-        std::vector<unsigned int> host_indices(n_indices);
-        for (size_t i = 0; i < n_indices; ++i) {
-            host_indices[i] = static_cast<unsigned int>(rand()) % n;
-        }
-        CUDA_CHECK(cudaMemcpy(input, host_input.data(), input_bytes, cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemcpy(indices, host_indices.data(), indices_bytes, cudaMemcpyHostToDevice));
+        std::vector<float> host_data(N, 1.0f);
+        CUDA_CHECK(cudaMemcpy(input, host_data.data(), array_bytes, cudaMemcpyHostToDevice));
     } else {
-        for (size_t i = 0; i < n; ++i) {
+        for (size_t i = 0; i < N; ++i) {
             input[i] = 1.0f;
-        }
-        for (size_t i = 0; i < n_indices; ++i) {
-            indices[i] = static_cast<unsigned int>(rand()) % n;
         }
     }
 
-    // Prefetch to GPU for uvm_prefetch mode
+    // Prefetch for uvm_prefetch mode
     if (mode == "uvm_prefetch") {
         int dev;
         CUDA_CHECK(cudaGetDevice(&dev));
-        CUDA_CHECK(cudaMemPrefetchAsync(input, input_bytes, dev, 0));
-        CUDA_CHECK(cudaMemPrefetchAsync(output, output_bytes, dev, 0));
-        CUDA_CHECK(cudaMemPrefetchAsync(indices, indices_bytes, dev, 0));
+        CUDA_CHECK(cudaMemPrefetchAsync(input, array_bytes, dev, 0));
+        CUDA_CHECK(cudaMemPrefetchAsync(output, array_bytes, dev, 0));
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    // Launch configuration
+    // Chunk-based configuration (same as sequential)
     int blockSize = 256;
-    int numBlocks = (n + blockSize - 1) / blockSize;
-    numBlocks = std::min(numBlocks, 1024);
+    int numBlocks = 256;
+    int T = numBlocks * blockSize;
+    int chunks_per_thread = 1;
 
-    // Use generic timing template
+    size_t chunk_elems = (N + T * chunks_per_thread - 1) / (T * chunks_per_thread);
+    size_t elems_per_page = 4096 / sizeof(float);
+    chunk_elems = ((chunk_elems + elems_per_page - 1) / elems_per_page) * elems_per_page;
+
+    unsigned int base_seed = 0x12345678;
+
     auto launch = [&]() {
-        rand_stream_kernel<<<numBlocks, blockSize>>>(input, output, indices, n, stride_elems);
+        rand_chunk_kernel<<<numBlocks, blockSize>>>(input, output, N, chunk_elems,
+                                                    chunks_per_thread, stride_elems, base_seed);
     };
 
-    time_kernel(launch, /*warmup=*/3, iterations, runtimes, result);
+    time_kernel(launch, /*warmup=*/2, iterations, runtimes, result);
 
-    // Calculate bytes accessed based on stride
-    size_t num_accesses = (n + stride_elems - 1) / stride_elems;
-
+    // Calculate bytes accessed
+    size_t total_pages = (N * sizeof(float) + 4095) / 4096;
     if (stride_bytes >= 4096) {
         // Page-level: count UVM migration bytes
-        size_t num_pages = num_accesses;
-        // Random input access + sequential output + sequential indices
-        result.bytes_accessed = num_pages * 4096 * 3;  // input + output + indices pages
+        result.bytes_accessed = total_pages * 4096 * 2;  // input + output
     } else {
-        // Element-level: count logical bytes
-        size_t logical_bytes = num_accesses * (sizeof(float) * 2 + sizeof(unsigned int));
-        result.bytes_accessed = logical_bytes;
+        // Element-level
+        result.bytes_accessed = N * sizeof(float) * 2;
     }
 
     // Cleanup
     CUDA_CHECK(cudaFree(input));
     CUDA_CHECK(cudaFree(output));
-    CUDA_CHECK(cudaFree(indices));
 }
 
 // ============================================================================
-// Kernel 3: Pointer Chase (worst case for TLB/cache)
+// Kernel 3: Pointer Chase - Chunk-local pointer chains
 // ============================================================================
+// Goal: Model pointer-heavy workloads (graph traversal, linked list)
+// Each chunk has its own independent random permutation
 
 struct Node {
     unsigned int next;  // Index of next node
-    float data;         // Payload
+    float data;
     float padding[1];   // Align to 16 bytes
 };
 
-// GPU-based node initialization (faster than CPU for large arrays)
-__device__ __forceinline__
-unsigned int lcg_hash(unsigned int x) {
-    return 1664525u * x + 1013904223u;
-}
-
-__global__ void init_nodes_kernel(Node* nodes, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+// GPU-based chunk initialization: each chunk is a local random permutation
+__global__ void init_chunks_kernel(Node* nodes, size_t nodes_per_chunk, int total_chunks) {
+    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     size_t stride = gridDim.x * blockDim.x;
+    size_t total_nodes = (size_t)total_chunks * nodes_per_chunk;
 
-    for (size_t i = idx; i < n; i += stride) {
-        unsigned int r = lcg_hash(static_cast<unsigned int>(i));
-        nodes[i].next = r % n;
+    for (size_t i = tid; i < total_nodes; i += stride) {
+        size_t chunk_id = i / nodes_per_chunk;
+        size_t offset = i % nodes_per_chunk;
+
+        // Generate next pointer within the same chunk (chunk-local chain)
+        unsigned int r = lcg_random((unsigned int)i);
+        size_t next_offset = r % nodes_per_chunk;
+        size_t next_idx = chunk_id * nodes_per_chunk + next_offset;
+
+        nodes[i].next = (unsigned int)next_idx;
         nodes[i].data = 1.0f;
         nodes[i].padding[0] = 0.0f;
     }
 }
 
-// Multi-segment pointer chase kernel for oversubscription testing
-// stride_elems: sample every Nth node (for page-level testing)
-__global__ void pointer_chase_kernel_segmented(const Node* nodes, float* result,
-                                                size_t n_per_seg, int steps, int segments,
-                                                size_t stride_elems) {
-    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t grid_stride = gridDim.x * blockDim.x;
+__global__ void pointer_chunk_kernel(const Node* nodes, float* output,
+                                     size_t nodes_per_chunk,
+                                     int chunks_per_thread,
+                                     int chase_steps) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int T = gridDim.x * blockDim.x;
 
-    // Process each segment
-    for (int seg = 0; seg < segments; ++seg) {
-        size_t base = seg * n_per_seg;
+    // Each thread processes chunks_per_thread chunks
+    for (int c = 0; c < chunks_per_thread; ++c) {
+        size_t chunk_id = (size_t)tid * chunks_per_thread + c;
+        size_t chunk_start = chunk_id * nodes_per_chunk;
 
-        // Grid-stride loop with sampling
-        for (size_t i = tid * stride_elems; i < n_per_seg; i += grid_stride * stride_elems) {
-            unsigned int current = static_cast<unsigned int>(base + i);
-            float sum = 0.0f;
+        // Start from beginning of chunk
+        unsigned int cur = (unsigned int)chunk_start;
+        float sum = 0.0f;
 
-            // Chase pointers for 'steps' iterations
-            for (int s = 0; s < steps; ++s) {
-                sum += nodes[current].data;
-                current = nodes[current].next;
-            }
-
-            result[base + i] = sum;
+        // Chase pointers (dependent loads)
+        #pragma unroll 4
+        for (int s = 0; s < chase_steps; ++s) {
+            sum += nodes[cur].data;
+            cur = nodes[cur].next;
         }
+
+        output[chunk_id] = sum;
     }
 }
 
 inline void run_pointer_chase(size_t total_working_set, const std::string& mode, size_t stride_bytes,
-                       int iterations, std::vector<float>& runtimes, KernelResult& result) {
-    // Multi-segment design for oversubscription:
-    // - Each segment has at most MAX_NODES_PER_SEG nodes
-    // - Total working set is divided into multiple segments
-    // - This allows oversub without huge CPU init cost
-    const size_t MAX_NODES_PER_SEG = 32 * 1024 * 1024;  // 32M nodes per segment
-
-    // Split: nodes (90%) + result (10%)
+                              int iterations, std::vector<float>& runtimes, KernelResult& result) {
+    // Split: nodes (90%) + output (10%)
     size_t nodes_bytes = static_cast<size_t>(total_working_set * 0.9);
-    size_t result_bytes = static_cast<size_t>(total_working_set * 0.1);
+    size_t output_bytes = static_cast<size_t>(total_working_set * 0.1);
 
-    // Calculate total nodes needed
     size_t total_nodes = nodes_bytes / sizeof(Node);
 
-    // Determine segments - limit to max 16 segments for reasonable runtime
-    size_t n_per_seg = std::min(total_nodes, MAX_NODES_PER_SEG);
-    int segments = static_cast<int>((total_nodes + n_per_seg - 1) / n_per_seg);
-    segments = std::min(segments, 16);  // Cap at 16 segments to keep runtime manageable
-
-    // Actual allocation (may be slightly larger due to rounding up)
-    size_t n_alloc = static_cast<size_t>(segments) * n_per_seg;
-    nodes_bytes = n_alloc * sizeof(Node);
-    result_bytes = n_alloc * sizeof(float);
-
-    // Calculate stride in elements (how many nodes per page to sample)
-    size_t stride_elems = std::max(1UL, stride_bytes / sizeof(Node));
+    (void)stride_bytes;  // Pointer chase ignores stride - always follows pointers
 
     // Sanity check for device mode
     if (mode == "device") {
         size_t free_bytes, total_bytes;
         CUDA_CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
-        if (nodes_bytes + result_bytes > free_bytes * 0.8) {
-            throw std::runtime_error("pointer_chase working set too large for device mode");
+        if (nodes_bytes + output_bytes > free_bytes * 0.8) {
+            throw std::runtime_error("Working set too large for device mode");
         }
     }
 
-    Node *nodes;
-    float *result_array;
+    // Chunk configuration
+    int blockSize = 256;
+    int numBlocks = 256;
+    int T = numBlocks * blockSize;
+    int chunks_per_thread = 1;
+    int total_chunks = T * chunks_per_thread;
 
-    // Allocate memory based on mode
+    // Calculate nodes per chunk
+    size_t nodes_per_chunk = (total_nodes + total_chunks - 1) / total_chunks;
+    // Align to page boundary
+    size_t nodes_per_page = 4096 / sizeof(Node);
+    nodes_per_chunk = ((nodes_per_chunk + nodes_per_page - 1) / nodes_per_page) * nodes_per_page;
+
+    // Actual allocation
+    size_t n_alloc = (size_t)total_chunks * nodes_per_chunk;
+    nodes_bytes = n_alloc * sizeof(Node);
+    output_bytes = total_chunks * sizeof(float);
+
+    Node* nodes;
+    float* output_array;
+
+    // Allocate
     if (mode == "device") {
         CUDA_CHECK(cudaMalloc(&nodes, nodes_bytes));
-        CUDA_CHECK(cudaMalloc(&result_array, result_bytes));
+        CUDA_CHECK(cudaMalloc(&output_array, output_bytes));
     } else {
         CUDA_CHECK(cudaMallocManaged(&nodes, nodes_bytes));
-        CUDA_CHECK(cudaMallocManaged(&result_array, result_bytes));
+        CUDA_CHECK(cudaMallocManaged(&output_array, output_bytes));
     }
 
-    // Use GPU-based initialization (much faster than CPU for large arrays)
+    // Initialize chunks on GPU
     int init_blockSize = 256;
     int init_numBlocks = (n_alloc + init_blockSize - 1) / init_blockSize;
     init_numBlocks = std::min(init_numBlocks, 2048);
 
-    init_nodes_kernel<<<init_numBlocks, init_blockSize>>>(nodes, n_alloc);
+    init_chunks_kernel<<<init_numBlocks, init_blockSize>>>(nodes, nodes_per_chunk, total_chunks);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // Prefetch to GPU for uvm_prefetch mode
+    // Prefetch for uvm_prefetch mode
     if (mode == "uvm_prefetch") {
         int dev;
         CUDA_CHECK(cudaGetDevice(&dev));
         CUDA_CHECK(cudaMemPrefetchAsync(nodes, nodes_bytes, dev, 0));
-        CUDA_CHECK(cudaMemPrefetchAsync(result_array, result_bytes, dev, 0));
+        CUDA_CHECK(cudaMemPrefetchAsync(output_array, output_bytes, dev, 0));
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
-    // Launch configuration
-    int blockSize = 256;
-    int numBlocks = (n_per_seg + blockSize - 1) / blockSize;
-    numBlocks = std::min(numBlocks, 1024);
-    int chase_steps = 4;  // Minimal steps for oversub testing to keep runtime reasonable
+    // Pointer chase steps: keep it small for reasonable runtime
+    int chase_steps = 8;
 
-    // Use generic timing template with multi-segment kernel
     auto launch = [&]() {
-        pointer_chase_kernel_segmented<<<numBlocks, blockSize>>>(
-            nodes, result_array, n_per_seg, chase_steps, segments, stride_elems);
+        pointer_chunk_kernel<<<numBlocks, blockSize>>>(nodes, output_array,
+                                                       nodes_per_chunk, chunks_per_thread, chase_steps);
     };
 
     time_kernel(launch, /*warmup=*/2, iterations, runtimes, result);
 
-    // Calculate bytes accessed accounting for stride sampling
-    size_t num_samples_per_seg = (n_per_seg + stride_elems - 1) / stride_elems;
-    size_t total_accesses = static_cast<size_t>(segments) * num_samples_per_seg * chase_steps;
+    // Calculate bytes accessed: total_chunks * nodes_per_chunk * chase_steps accesses
+    size_t total_accesses = (size_t)total_chunks * nodes_per_chunk * chase_steps;
+    size_t total_pages = (n_alloc * sizeof(Node) + 4095) / 4096;
 
-    if (stride_bytes >= 4096) {
-        // Page-level: count UVM migration bytes (each access touches a 4KB page)
-        result.bytes_accessed = total_accesses * 4096;
-    } else {
-        // Element-level: count logical bytes
-        result.bytes_accessed = total_accesses * sizeof(Node);
-    }
+    // For pointer chase, we access pages during traversal
+    result.bytes_accessed = total_pages * 4096;
 
     // Cleanup
     CUDA_CHECK(cudaFree(nodes));
-    CUDA_CHECK(cudaFree(result_array));
+    CUDA_CHECK(cudaFree(output_array));
 }
 
 #endif // SYNTHETIC_CUH

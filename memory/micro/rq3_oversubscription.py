@@ -20,9 +20,8 @@ import sys
 KERNELS = ['seq_stream', 'rand_stream', 'pointer_chase']
 MODES   = ['device', 'uvm']
 
-# Size factors for different kernels
-SIZE_FACTORS_GENERIC   = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5]
-SIZE_FACTORS_PTRCHASE  = [0.25, 0.5, 0.75, 1.0, 1.25]  # pointer-chase runs fewer points
+# Unified size factors (keep runtime reasonable - max 1.25x)
+SIZE_FACTORS = [0.5, 0.75, 1.0, 1.25]
 
 STRIDE_BYTES = 4096   # page-level for ALL kernels (fair comparison)
 ITERATIONS   = 3      # reduced for faster execution
@@ -58,21 +57,13 @@ def run_benchmark(kernel, mode, size_factor, output_file):
 def collect_results():
     """Run all benchmark configurations"""
     results = []
-    total_configs = sum(
-        len(SIZE_FACTORS_PTRCHASE if k == 'pointer_chase' else SIZE_FACTORS_GENERIC)
-        for k in KERNELS
-    ) * len(MODES)
+    total_configs = len(KERNELS) * len(MODES) * len(SIZE_FACTORS)
 
     current = 0
 
     for kernel in KERNELS:
-        # Use fewer points for pointer_chase
-        size_factors = (SIZE_FACTORS_PTRCHASE
-                        if kernel == 'pointer_chase'
-                        else SIZE_FACTORS_GENERIC)
-
         for mode in MODES:
-            for sf in size_factors:
+            for sf in SIZE_FACTORS:
                 current += 1
                 print(f"\n=== Progress: {current}/{total_configs} ===")
 
