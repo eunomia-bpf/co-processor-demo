@@ -16,16 +16,23 @@ import sys
 KERNELS = ['seq_stream', 'rand_stream', 'pointer_chase']
 MODES = ['device', 'uvm']
 SIZE_FACTORS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0]  # Sweep from undersubscription to oversubscription
-ITERATIONS = 10
+STRIDE_BYTES = 4096  # Page-level for faster oversubscription testing
+ITERATIONS = 5       # Reduced for faster execution
 EXECUTABLE = './uvmbench'
 
 def run_benchmark(kernel, mode, size_factor, output_file):
     """Run a single benchmark configuration"""
+    # Use element-level stride for device mode, page-level for UVM oversub
+    stride = STRIDE_BYTES
+    if mode == 'device':
+        stride = 4  # Element-level for device mode
+
     cmd = [
         EXECUTABLE,
         f'--kernel={kernel}',
         f'--mode={mode}',
         f'--size_factor={size_factor}',
+        f'--stride_bytes={stride}',
         f'--iterations={ITERATIONS}',
         f'--output={output_file}'
     ]
@@ -54,9 +61,9 @@ def collect_results():
                 current += 1
                 print(f"\nProgress: {current}/{total}")
 
-                # Skip device mode for oversubscription (>1.0x) - it will OOM
-                if mode == 'device' and size_factor > 1.0:
-                    print(f"Skipping {kernel} {mode} {size_factor}x (would OOM)")
+                # Skip device mode for oversubscription (>0.8x) - would OOM or fail validation
+                if mode == 'device' and size_factor > 0.8:
+                    print(f"Skipping {kernel} {mode} {size_factor}x (exceeds device mode limit)")
                     continue
 
                 output_file = f'results_rq3_{kernel}_{mode}_{size_factor}.csv'
@@ -158,6 +165,7 @@ def plot_results(df):
     print("\n" + "="*80)
     print("RQ3 SUMMARY: Oversubscription Impact on UVM Performance")
     print("="*80)
+    print(f"\nConfiguration: stride_bytes={STRIDE_BYTES} (page-level for UVM), iterations={ITERATIONS}")
 
     for kernel in KERNELS:
         print(f"\n{kernel_display_names[kernel]}:")

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <algorithm>
 #include <limits>
+#include <functional>
 
 #define CUDA_CHECK(call) \
     do { \
@@ -26,14 +27,57 @@ struct KernelResult {
 };
 
 // ============================================================================
+// Generic timing and statistics template
+// ============================================================================
+
+template <typename LaunchFunc>
+inline void time_kernel(LaunchFunc launch_kernel, int warmup_iterations, int timed_iterations,
+                        std::vector<float>& runtimes, KernelResult& result) {
+    // Warmup
+    for (int i = 0; i < warmup_iterations; ++i) {
+        launch_kernel();
+        CUDA_CHECK(cudaDeviceSynchronize());
+    }
+
+    // Timed iterations
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+
+    for (int i = 0; i < timed_iterations; ++i) {
+        CUDA_CHECK(cudaEventRecord(start));
+        launch_kernel();
+        CUDA_CHECK(cudaEventRecord(stop));
+        CUDA_CHECK(cudaEventSynchronize(stop));
+
+        float ms;
+        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+        runtimes.push_back(ms);
+    }
+
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+
+    // Compute statistics
+    std::sort(runtimes.begin(), runtimes.end());
+    result.median_ms = runtimes[runtimes.size() / 2];
+    result.min_ms = runtimes.front();
+    result.max_ms = runtimes.back();
+}
+
+// ============================================================================
 // Kernel 1: Sequential Stream (read with light computation)
 // ============================================================================
 
-__global__ void seq_stream_kernel(const float* input, float* output, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t stride = gridDim.x * blockDim.x;
+__global__ void seq_stream_kernel(const float* input, float* output, size_t n, size_t stride_elems) {
+    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t grid_stride = gridDim.x * blockDim.x;
 
-    for (size_t i = idx; i < n; i += stride) {
+    // stride_elems determines granularity:
+    // - stride_elems = 1: access every element (element-level)
+    // - stride_elems = page_size/sizeof(float): access one element per page (page-level)
+    for (size_t page = tid; page * stride_elems < n; page += grid_stride) {
+        size_t i = page * stride_elems;
         // Sequential read with simple computation
         float val = input[i];
         // Light computation to avoid pure memory copy
@@ -42,11 +86,12 @@ __global__ void seq_stream_kernel(const float* input, float* output, size_t n) {
     }
 }
 
-inline void run_seq_stream(size_t total_working_set, const std::string& mode, int iterations,
-                    std::vector<float>& runtimes, KernelResult& result) {
+inline void run_seq_stream(size_t total_working_set, const std::string& mode, size_t stride_bytes,
+                    int iterations, std::vector<float>& runtimes, KernelResult& result) {
     // Split working set: input (50%) + output (50%)
     size_t array_bytes = total_working_set / 2;
     size_t n = array_bytes / sizeof(float);
+    size_t stride_elems = std::max(1UL, stride_bytes / sizeof(float));
 
     // Sanity check for device mode
     if (mode == "device") {
@@ -79,18 +124,12 @@ inline void run_seq_stream(size_t total_working_set, const std::string& mode, in
         }
     }
 
-    // Touch pages if requested (for uvm_prefetch mode)
-    // Note: CUDA 12.9 changed cudaMemPrefetchAsync API significantly
-    // For now, we use simple page touch to trigger initial faults
+    // Prefetch to GPU for uvm_prefetch mode
     if (mode == "uvm_prefetch") {
-        // Touch all pages to trigger faults before timing
-        volatile float touch = 0.0f;
-        for (size_t i = 0; i < n; i += 4096/sizeof(float)) {
-            touch += input[i];
-        }
-        for (size_t i = 0; i < n; i += 4096/sizeof(float)) {
-            output[i] = 0.0f;
-        }
+        int dev;
+        CUDA_CHECK(cudaGetDevice(&dev));
+        CUDA_CHECK(cudaMemPrefetchAsync(input, array_bytes, dev, 0));
+        CUDA_CHECK(cudaMemPrefetchAsync(output, array_bytes, dev, 0));
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
@@ -100,39 +139,27 @@ inline void run_seq_stream(size_t total_working_set, const std::string& mode, in
     // Cap at reasonable number of blocks
     numBlocks = std::min(numBlocks, 1024);
 
-    // Warmup
-    for (int i = 0; i < 3; ++i) {
-        seq_stream_kernel<<<numBlocks, blockSize>>>(input, output, n);
-        CUDA_CHECK(cudaDeviceSynchronize());
+    // Use generic timing template
+    auto launch = [&]() {
+        seq_stream_kernel<<<numBlocks, blockSize>>>(input, output, n, stride_elems);
+    };
+
+    time_kernel(launch, /*warmup=*/3, iterations, runtimes, result);
+
+    // Calculate bytes accessed based on stride
+    // Number of actual accesses = ceil(n / stride_elems)
+    size_t num_accesses = (n + stride_elems - 1) / stride_elems;
+    size_t logical_bytes = num_accesses * sizeof(float) * 2;  // read + write
+
+    // For page-level stride, also calculate effective migration bytes
+    if (stride_bytes >= 4096) {
+        // UVM migrates entire pages, so count page-level traffic
+        size_t num_pages = num_accesses;
+        result.bytes_accessed = num_pages * 4096 * 2;  // input pages + output pages
+    } else {
+        // Element-level access: use logical bytes
+        result.bytes_accessed = logical_bytes;
     }
-
-    // Timed iterations
-    cudaEvent_t start, stop;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
-
-    for (int i = 0; i < iterations; ++i) {
-        CUDA_CHECK(cudaEventRecord(start));
-        seq_stream_kernel<<<numBlocks, blockSize>>>(input, output, n);
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-
-        float ms;
-        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-        runtimes.push_back(ms);
-    }
-
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
-
-    // Calculate bytes accessed: read input + write output
-    result.bytes_accessed = array_bytes * 2;  // Read all input, write all output
-
-    // Compute statistics
-    std::sort(runtimes.begin(), runtimes.end());
-    result.median_ms = runtimes[runtimes.size() / 2];
-    result.min_ms = runtimes.front();
-    result.max_ms = runtimes.back();
 
     // Cleanup
     CUDA_CHECK(cudaFree(input));
@@ -144,11 +171,12 @@ inline void run_seq_stream(size_t total_working_set, const std::string& mode, in
 // ============================================================================
 
 __global__ void rand_stream_kernel(const float* input, float* output,
-                                   const unsigned int* indices, size_t n) {
-    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t stride = gridDim.x * blockDim.x;
+                                   const unsigned int* indices, size_t n, size_t stride_elems) {
+    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t grid_stride = gridDim.x * blockDim.x;
 
-    for (size_t i = idx; i < n; i += stride) {
+    for (size_t page = tid; page * stride_elems < n; page += grid_stride) {
+        size_t i = page * stride_elems;
         // Random access via index array
         unsigned int access_idx = indices[i] % n;
         float val = input[access_idx];
@@ -157,8 +185,8 @@ __global__ void rand_stream_kernel(const float* input, float* output,
     }
 }
 
-inline void run_rand_stream(size_t total_working_set, const std::string& mode, int iterations,
-                     std::vector<float>& runtimes, KernelResult& result) {
+inline void run_rand_stream(size_t total_working_set, const std::string& mode, size_t stride_bytes,
+                     int iterations, std::vector<float>& runtimes, KernelResult& result) {
     // Split working set: input (40%) + output (40%) + indices (20%)
     size_t input_bytes = static_cast<size_t>(total_working_set * 0.4);
     size_t output_bytes = static_cast<size_t>(total_working_set * 0.4);
@@ -166,6 +194,7 @@ inline void run_rand_stream(size_t total_working_set, const std::string& mode, i
 
     size_t n = input_bytes / sizeof(float);
     size_t n_indices = std::min(n, indices_bytes / sizeof(unsigned int));
+    size_t stride_elems = std::max(1UL, stride_bytes / sizeof(float));
 
     // Limit n to avoid overflow
     if (n > std::numeric_limits<unsigned int>::max() / 2) {
@@ -217,19 +246,13 @@ inline void run_rand_stream(size_t total_working_set, const std::string& mode, i
         }
     }
 
-    // Touch pages if requested (for uvm_prefetch mode)
+    // Prefetch to GPU for uvm_prefetch mode
     if (mode == "uvm_prefetch") {
-        // Touch all pages to trigger faults before timing
-        volatile float touch = 0.0f;
-        for (size_t i = 0; i < n; i += 4096/sizeof(float)) {
-            touch += input[i];
-        }
-        for (size_t i = 0; i < n; i += 4096/sizeof(float)) {
-            output[i] = 0.0f;
-        }
-        for (size_t i = 0; i < n_indices; i += 4096/sizeof(unsigned int)) {
-            indices[i] = indices[i];
-        }
+        int dev;
+        CUDA_CHECK(cudaGetDevice(&dev));
+        CUDA_CHECK(cudaMemPrefetchAsync(input, input_bytes, dev, 0));
+        CUDA_CHECK(cudaMemPrefetchAsync(output, output_bytes, dev, 0));
+        CUDA_CHECK(cudaMemPrefetchAsync(indices, indices_bytes, dev, 0));
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
@@ -238,39 +261,26 @@ inline void run_rand_stream(size_t total_working_set, const std::string& mode, i
     int numBlocks = (n + blockSize - 1) / blockSize;
     numBlocks = std::min(numBlocks, 1024);
 
-    // Warmup
-    for (int i = 0; i < 3; ++i) {
-        rand_stream_kernel<<<numBlocks, blockSize>>>(input, output, indices, n);
-        CUDA_CHECK(cudaDeviceSynchronize());
+    // Use generic timing template
+    auto launch = [&]() {
+        rand_stream_kernel<<<numBlocks, blockSize>>>(input, output, indices, n, stride_elems);
+    };
+
+    time_kernel(launch, /*warmup=*/3, iterations, runtimes, result);
+
+    // Calculate bytes accessed based on stride
+    size_t num_accesses = (n + stride_elems - 1) / stride_elems;
+
+    if (stride_bytes >= 4096) {
+        // Page-level: count UVM migration bytes
+        size_t num_pages = num_accesses;
+        // Random input access + sequential output + sequential indices
+        result.bytes_accessed = num_pages * 4096 * 3;  // input + output + indices pages
+    } else {
+        // Element-level: count logical bytes
+        size_t logical_bytes = num_accesses * (sizeof(float) * 2 + sizeof(unsigned int));
+        result.bytes_accessed = logical_bytes;
     }
-
-    // Timed iterations
-    cudaEvent_t start, stop;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
-
-    for (int i = 0; i < iterations; ++i) {
-        CUDA_CHECK(cudaEventRecord(start));
-        rand_stream_kernel<<<numBlocks, blockSize>>>(input, output, indices, n);
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-
-        float ms;
-        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-        runtimes.push_back(ms);
-    }
-
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
-
-    // Calculate bytes accessed: read input (random) + read indices + write output
-    result.bytes_accessed = input_bytes + indices_bytes + output_bytes;
-
-    // Compute statistics
-    std::sort(runtimes.begin(), runtimes.end());
-    result.median_ms = runtimes[runtimes.size() / 2];
-    result.min_ms = runtimes.front();
-    result.max_ms = runtimes.back();
 
     // Cleanup
     CUDA_CHECK(cudaFree(input));
@@ -290,27 +300,30 @@ struct Node {
 
 __global__ void pointer_chase_kernel(const Node* nodes, float* result, size_t n, int steps) {
     size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t stride = gridDim.x * blockDim.x;
 
-    if (tid < n) {
-        unsigned int current = tid;
+    // Grid-stride loop to ensure full coverage of all nodes
+    for (size_t i = tid; i < n; i += stride) {
+        unsigned int current = i;
         float sum = 0.0f;
 
         // Chase pointers for 'steps' iterations
-        for (int i = 0; i < steps; ++i) {
+        for (int s = 0; s < steps; ++s) {
             sum += nodes[current].data;
             current = nodes[current].next;
         }
 
-        result[tid] = sum;
+        result[i] = sum;
     }
 }
 
-inline void run_pointer_chase(size_t total_working_set, const std::string& mode, int iterations,
-                       std::vector<float>& runtimes, KernelResult& result) {
+inline void run_pointer_chase(size_t total_working_set, const std::string& mode, size_t stride_bytes,
+                       int iterations, std::vector<float>& runtimes, KernelResult& result) {
     // CRITICAL: Cap pointer_chase size to prevent CPU initialization slowdown
-    // Max 128M nodes (~2GB for nodes + result)
-    const size_t MAX_NODES = 128 * 1024 * 1024;
+    // Max 32M nodes (~512MB for nodes + result) - reduced for faster runs
+    const size_t MAX_NODES = 32 * 1024 * 1024;
     const size_t MAX_WORKING_SET = MAX_NODES * sizeof(Node) + MAX_NODES * sizeof(float);
+    size_t stride_nodes = std::max(1UL, stride_bytes / sizeof(Node));
 
     if (total_working_set > MAX_WORKING_SET) {
         total_working_set = MAX_WORKING_SET;
@@ -374,16 +387,12 @@ inline void run_pointer_chase(size_t total_working_set, const std::string& mode,
         }
     }
 
-    // Touch pages if requested (for uvm_prefetch mode)
+    // Prefetch to GPU for uvm_prefetch mode
     if (mode == "uvm_prefetch") {
-        // Touch all pages to trigger faults before timing
-        volatile float touch = 0.0f;
-        for (size_t i = 0; i < n; i += 4096/sizeof(Node)) {
-            touch += nodes[i].data;
-        }
-        for (size_t i = 0; i < n; i += 4096/sizeof(float)) {
-            result_array[i] = 0.0f;
-        }
+        int dev;
+        CUDA_CHECK(cudaGetDevice(&dev));
+        CUDA_CHECK(cudaMemPrefetchAsync(nodes, nodes_bytes, dev, 0));
+        CUDA_CHECK(cudaMemPrefetchAsync(result_array, result_bytes, dev, 0));
         CUDA_CHECK(cudaDeviceSynchronize());
     }
 
@@ -393,41 +402,18 @@ inline void run_pointer_chase(size_t total_working_set, const std::string& mode,
     numBlocks = std::min(numBlocks, 1024);
     int chase_steps = 100;  // Number of pointer chases per thread
 
-    // Warmup
-    for (int i = 0; i < 3; ++i) {
+    // Use generic timing template
+    auto launch = [&]() {
         pointer_chase_kernel<<<numBlocks, blockSize>>>(nodes, result_array, n, chase_steps);
-        CUDA_CHECK(cudaDeviceSynchronize());
-    }
+    };
 
-    // Timed iterations
-    cudaEvent_t start, stop;
-    CUDA_CHECK(cudaEventCreate(&start));
-    CUDA_CHECK(cudaEventCreate(&stop));
+    time_kernel(launch, /*warmup=*/3, iterations, runtimes, result);
 
-    for (int i = 0; i < iterations; ++i) {
-        CUDA_CHECK(cudaEventRecord(start));
-        pointer_chase_kernel<<<numBlocks, blockSize>>>(nodes, result_array, n, chase_steps);
-        CUDA_CHECK(cudaEventRecord(stop));
-        CUDA_CHECK(cudaEventSynchronize(stop));
-
-        float ms;
-        CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
-        runtimes.push_back(ms);
-    }
-
-    CUDA_CHECK(cudaEventDestroy(start));
-    CUDA_CHECK(cudaEventDestroy(stop));
-
-    // Calculate bytes accessed: each thread does chase_steps reads of Node
-    // Total active threads = min(n, numBlocks * blockSize)
-    size_t active_threads = std::min(n, static_cast<size_t>(numBlocks * blockSize));
-    result.bytes_accessed = active_threads * chase_steps * sizeof(Node);
-
-    // Compute statistics
-    std::sort(runtimes.begin(), runtimes.end());
-    result.median_ms = runtimes[runtimes.size() / 2];
-    result.min_ms = runtimes.front();
-    result.max_ms = runtimes.back();
+    // Calculate bytes accessed: with grid-stride loop, all n nodes are accessed
+    // Each node is read chase_steps times
+    // Note: pointer_chase always uses grid-stride to cover all nodes regardless of stride_bytes
+    result.bytes_accessed = n * chase_steps * sizeof(Node);
+    (void)stride_nodes;  // Unused for pointer_chase
 
     // Cleanup
     CUDA_CHECK(cudaFree(nodes));

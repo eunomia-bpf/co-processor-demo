@@ -20,7 +20,6 @@
 * RQ2：**UVM 在不同访存模式和计算强度的 kernel 上表现是否一致？** dense vs stencil vs sparse vs graph vs attention。
 * RQ3：**在 realistic oversubscription（1.0×–2.0× 显存）下，哪些 kernel 还能“勉强可用”，哪些直接被 thrash 掉？**
 * RQ4：**简单 prefetch（如 cudaMemPrefetchAsync）在 real kernel 上的收益/副作用有多大？** 对哪些访问 pattern 有用，对哪些完全救不了。
-* RQ5（可选）：**不同 GPU 架构 / interconnect 对 UVM 行为有多大影响？**（V100/A100/consumer GPU，PCIe vs NVLink）
 
 Tier‑0 synthetic 只用来给这几类 real kernel 找“解释工具”；**所有结论必须在 Tier‑1/2 上复现**，否则 OSDI reviewer 会直接说“你这个只在合成负载上 work”。
 

@@ -9,8 +9,9 @@
 struct Config {
     std::string kernel = "seq_stream";
     std::string mode = "uvm";
-    float size_factor = 1.0;
-    int iterations = 10;
+    float size_factor = 0.25;  // Reduced default for lighter workload
+    int iterations = 5;         // Reduced default for faster runs
+    size_t stride_bytes = 4096; // Access granularity (4096 = page-level for oversub tests)
     std::string output = "results.csv";
 };
 
@@ -19,8 +20,13 @@ void print_usage(const char* prog) {
               << "Options:\n"
               << "  --kernel=<name>        Kernel: seq_stream, rand_stream, pointer_chase (default: seq_stream)\n"
               << "  --mode=<mode>          Mode: device, uvm, uvm_prefetch (default: uvm)\n"
-              << "  --size_factor=<float>  Size factor relative to GPU memory (default: 1.0)\n"
-              << "  --iterations=<int>     Number of iterations (default: 10)\n"
+              << "  --size_factor=<float>  Size factor relative to GPU memory (default: 0.25)\n"
+              << "                         device mode: requires <= 0.8\n"
+              << "                         uvm mode: can be > 1.0 for oversubscription\n"
+              << "  --stride_bytes=<int>   Access stride in bytes (default: 4096)\n"
+              << "                         4096 = page-level access (one element per page)\n"
+              << "                         4    = element-level access (all elements)\n"
+              << "  --iterations=<int>     Number of iterations (default: 5)\n"
               << "  --output=<path>        Output CSV file (default: results.csv)\n"
               << "  --help                 Show this help\n";
 }
@@ -42,6 +48,8 @@ Config parse_args(int argc, char** argv) {
             config.mode = arg.substr(7);
         } else if (arg.substr(0, 14) == "--size_factor=") {
             config.size_factor = std::stof(arg.substr(14));
+        } else if (arg.substr(0, 15) == "--stride_bytes=") {
+            config.stride_bytes = std::stoul(arg.substr(15));
         } else if (arg.substr(0, 13) == "--iterations=") {
             config.iterations = std::stoi(arg.substr(13));
         } else if (arg.substr(0, 9) == "--output=") {
@@ -53,6 +61,14 @@ Config parse_args(int argc, char** argv) {
         }
     }
 
+    // Validate device mode size_factor
+    if (config.mode == "device" && config.size_factor > 0.8f) {
+        std::cerr << "Error: device mode requires size_factor <= 0.8 to avoid OOM\n";
+        std::cerr << "       (current size_factor: " << config.size_factor << ")\n";
+        std::cerr << "       Use --size_factor=0.8 or smaller, or use --mode=uvm for oversubscription\n";
+        exit(1);
+    }
+
     return config;
 }
 
@@ -62,14 +78,42 @@ size_t get_gpu_memory() {
     return total_bytes;
 }
 
-float compute_median(std::vector<float>& times) {
-    if (times.empty()) return 0.0f;
-    std::sort(times.begin(), times.end());
-    size_t n = times.size();
-    if (n % 2 == 0) {
-        return (times[n/2-1] + times[n/2]) / 2.0f;
-    } else {
-        return times[n/2];
+// ============================================================================
+// Kernel Registry System
+// ============================================================================
+
+using KernelRunner = void(*)(size_t, const std::string&, size_t, int,
+                              std::vector<float>&, KernelResult&);
+
+struct KernelEntry {
+    const char* name;
+    const char* description;
+    KernelRunner runner;
+};
+
+// Registry of available kernels
+const KernelEntry g_kernels[] = {
+    {"seq_stream",     "Sequential streaming with light compute", run_seq_stream},
+    {"rand_stream",    "Random access pattern with index indirection", run_rand_stream},
+    {"pointer_chase",  "Pointer chasing for TLB/cache stress", run_pointer_chase},
+    // Add new kernels here: {"gemm", "Matrix multiply", run_gemm},
+};
+
+const int g_num_kernels = sizeof(g_kernels) / sizeof(g_kernels[0]);
+
+KernelRunner lookup_kernel(const std::string& name) {
+    for (int i = 0; i < g_num_kernels; ++i) {
+        if (name == g_kernels[i].name) {
+            return g_kernels[i].runner;
+        }
+    }
+    return nullptr;
+}
+
+void print_available_kernels() {
+    std::cout << "Available kernels:\n";
+    for (int i = 0; i < g_num_kernels; ++i) {
+        std::cout << "  " << g_kernels[i].name << " - " << g_kernels[i].description << "\n";
     }
 }
 
@@ -133,35 +177,36 @@ int main(int argc, char** argv) {
     std::cout << "UVM Microbenchmark - Tier 0 Synthetic Kernels\n"
               << "==============================================\n"
               << "GPU Memory: " << gpu_mem / (1024*1024) << " MB\n"
-              << "Size Factor: " << config.size_factor << "\n"
+              << "Size Factor: " << config.size_factor;
+    if (config.size_factor > 1.0f) {
+        std::cout << " (oversubscription)";
+    }
+    std::cout << "\n"
               << "Total Working Set: " << total_working_set / (1024*1024) << " MB\n"
+              << "Stride Bytes: " << config.stride_bytes;
+    if (config.stride_bytes == 4096) {
+        std::cout << " (page-level)";
+    } else if (config.stride_bytes == sizeof(float)) {
+        std::cout << " (element-level)";
+    }
+    std::cout << "\n"
               << "Kernel: " << config.kernel << "\n"
               << "Mode: " << config.mode << "\n"
-              << "Iterations: " << config.iterations << "\n";
+              << "Iterations: " << config.iterations << "\n\n";
 
-    // Warn for device mode oversubscription
-    if (config.mode == "device" && config.size_factor > 0.8) {
-        std::cout << "\n*** WARNING: size_factor > 0.8 in device mode may cause OOM! ***\n";
-        std::cout << "*** Consider using size_factor <= 0.8 for device mode        ***\n";
-    }
-
-    std::cout << "\n";
-
-    // Run the selected kernel
+    // Run the selected kernel using registry
     std::vector<float> runtimes;
     KernelResult result;
 
     try {
-        if (config.kernel == "seq_stream") {
-            run_seq_stream(total_working_set, config.mode, config.iterations, runtimes, result);
-        } else if (config.kernel == "rand_stream") {
-            run_rand_stream(total_working_set, config.mode, config.iterations, runtimes, result);
-        } else if (config.kernel == "pointer_chase") {
-            run_pointer_chase(total_working_set, config.mode, config.iterations, runtimes, result);
-        } else {
-            std::cerr << "Unknown kernel: " << config.kernel << std::endl;
+        KernelRunner runner = lookup_kernel(config.kernel);
+        if (!runner) {
+            std::cerr << "Error: Unknown kernel '" << config.kernel << "'\n\n";
+            print_available_kernels();
             return 1;
         }
+
+        runner(total_working_set, config.mode, config.stride_bytes, config.iterations, runtimes, result);
 
         // Write results
         write_results(config, result, total_working_set);

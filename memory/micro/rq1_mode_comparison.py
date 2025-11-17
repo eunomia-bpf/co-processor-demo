@@ -15,7 +15,8 @@ import sys
 KERNELS = ['seq_stream', 'rand_stream', 'pointer_chase']
 MODES = ['device', 'uvm', 'uvm_prefetch']
 SIZE_FACTOR = 0.25  # Use 0.25x GPU memory for fair comparison (Tier-0 only)
-ITERATIONS = 10
+STRIDE_BYTES = 4    # Element-level for fair throughput comparison
+ITERATIONS = 5      # Reduced for faster execution
 EXECUTABLE = './uvmbench'
 
 def run_benchmark(kernel, mode, size_factor, output_file):
@@ -25,6 +26,7 @@ def run_benchmark(kernel, mode, size_factor, output_file):
         f'--kernel={kernel}',
         f'--mode={mode}',
         f'--size_factor={size_factor}',
+        f'--stride_bytes={STRIDE_BYTES}',
         f'--iterations={ITERATIONS}',
         f'--output={output_file}'
     ]
@@ -138,7 +140,7 @@ def plot_results(df):
     print("\n" + "="*60)
     print("RQ1 SUMMARY: UVM Overhead on Tier-0 Synthetic Kernels")
     print("="*60)
-    print(f"\nConfiguration: size_factor={SIZE_FACTOR}, iterations={ITERATIONS}")
+    print(f"\nConfiguration: size_factor={SIZE_FACTOR}, stride_bytes={STRIDE_BYTES}, iterations={ITERATIONS}")
     print("\nSlowdown vs Device-Only Baseline:")
     print(slowdown_pivot.to_string())
     print("\nKey Findings:")

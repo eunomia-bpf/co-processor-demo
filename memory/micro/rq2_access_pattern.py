@@ -16,7 +16,8 @@ import sys
 KERNELS = ['seq_stream', 'rand_stream', 'pointer_chase']
 MODE = 'uvm'  # Focus on UVM behavior
 SIZE_FACTOR = 0.5  # Use 0.5x GPU memory
-ITERATIONS = 10
+STRIDE_BYTES = 4    # Element-level for throughput comparison
+ITERATIONS = 5      # Reduced for faster execution
 EXECUTABLE = './uvmbench'
 
 def run_benchmark(kernel, mode, size_factor, output_file):
@@ -26,6 +27,7 @@ def run_benchmark(kernel, mode, size_factor, output_file):
         f'--kernel={kernel}',
         f'--mode={mode}',
         f'--size_factor={size_factor}',
+        f'--stride_bytes={STRIDE_BYTES}',
         f'--iterations={ITERATIONS}',
         f'--output={output_file}'
     ]
@@ -172,7 +174,7 @@ def plot_results(df):
     print("\n" + "="*70)
     print("RQ2 SUMMARY: Access Pattern Impact on UVM Performance")
     print("="*70)
-    print(f"\nConfiguration: size_factor={SIZE_FACTOR}, iterations={ITERATIONS}")
+    print(f"\nConfiguration: size_factor={SIZE_FACTOR}, stride_bytes={STRIDE_BYTES}, iterations={ITERATIONS}")
     print("\nPerformance by Access Pattern:")
     print(analysis_df.to_string(index=False))
 
