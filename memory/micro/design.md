@@ -1,33 +1,16 @@
-对，你说得对：**只拿 seq_read / random_read 这种玩具 kernel 上 OSDI 肯定不买账**。这些顶多是“补充 microbench”，主角还是要贴近 SC’21、UVMBench、MGG、InfiniGen 那种“real kernel + clear memory pattern”。
-
-我重写一套设计，把 microbench 分成三层：
+一套设计，把 microbench 分成三层：
 
 * Tier‑0：极简 synthetic kernel（保留，但只是用来解释机制）
 * Tier‑1：典型 “real kernel”（GEMM、Stencil、SpMV、BFS、Conv 等）
 * Tier‑2：领域特定 kernel（Transformer layer、GNN layer、一层 CNN）
 
-下面全部按“你准备写 OSDI measurement/system paper”的标准来设计。
+下面全部按"你准备写 OSDI measurement/system paper"的标准来设计。
 
 ---
 
-## 一、整体设计思路
+## 一、Workload 设计：三层结构 (Tier-0/1/2)
 
-### 1.1 目标和 RQ（重新整理）
-
-你这套 benchmark 最终要支撑的是类似这样的一组问题：
-
-* RQ1：**在真实 kernel 上，UVM 相对显式 GPU 内存管理的性能损失有多大？**（HPC / DL / GNN / LLM 各一类）
-* RQ2：**UVM 在不同访存模式和计算强度的 kernel 上表现是否一致？** dense vs stencil vs sparse vs graph vs attention。
-* RQ3：**在 realistic oversubscription（1.0×–2.0× 显存）下，哪些 kernel 还能“勉强可用”，哪些直接被 thrash 掉？**
-* RQ4：**简单 prefetch（如 cudaMemPrefetchAsync）在 real kernel 上的收益/副作用有多大？** 对哪些访问 pattern 有用，对哪些完全救不了。
-
-Tier‑0 synthetic 只用来给这几类 real kernel 找“解释工具”；**所有结论必须在 Tier‑1/2 上复现**，否则 OSDI reviewer 会直接说“你这个只在合成负载上 work”。
-
----
-
-## 二、Workload 设计：从玩具到 real kernel 的三层结构
-
-### 2.1 Tier‑0：保留少量 synthetic kernel（只做“显微镜”）
+### 1.1 Tier‑0：Synthetic Kernels（机制解释工具）
 
 这一层你可以保留 2–3 个最基础的访问模式就够了，用来解释 UVM 行为本身：
 
@@ -35,15 +18,225 @@ Tier‑0 synthetic 只用来给这几类 real kernel 找“解释工具”；**�
 * `rand_stream`：完全随机读写 managed 数组，看最坏场景下每页只用几个字节的情况。
 * `pointer_chase`：典型 TLB + pointer-chasing 场景。
 
-这层不再是 main evaluation，而是在 Section “UVM Behavior Characterization” 里给 real kernel 提供解读 basis——比如说明为什么 SpMV 这么烂，而 GEMM 相对没那么惨。
+这层不再是 main evaluation，而是在 Section "UVM Behavior Characterization" 里给 real kernel 提供解读 basis——比如说明为什么 SpMV 这么烂，而 GEMM 相对没那么惨。
+
+#### T0-RQ3 当前实现：Oversubscription Characterization with Page-Level Probing
+
+**实验目标**
+
+在统一的页级访问粒度（4096B stride）下，对比三种访问模式在 oversubscription 时的行为：
+- Sequential stream: 顺序页扫描
+- Random stream: 页级随机访问
+- Pointer chase: 固定长度依赖链
+
+**Kernel 设计**
+
+统一的 Chunk-Based 抽象
+
+所有 kernel 使用相同的线程配置和数据分块模型：
+
+```
+固定参数：
+- blockSize = 256
+- numBlocks = 256
+- total_threads = 65536
+- chunks_per_thread = 1
+- total_chunks = 65536
+
+计算 chunk size：
+chunk_elems = (N / total_chunks)，向上对齐到页边界
+nodes_per_chunk = (total_nodes / total_chunks)，向上对齐到页边界
+```
+
+每个线程负责处理固定数量的 chunk（当前为 1），总 WSS 由 `total_working_set` 参数控制，与线程数解耦。
+
+#### Kernel 1: Sequential Stream (`seq_stream`)
+
+**语义**：每个线程顺序扫描自己的 tile，模拟 GEMM/stencil 类型的访问模式。
+
+**实现**：
+```cpp
+__global__ void seq_chunk_kernel(const float* input, float* output,
+                                 size_t N,
+                                 size_t chunk_elems,
+                                 int chunks_per_thread,
+                                 size_t stride_elems) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    for (int c = 0; c < chunks_per_thread; ++c) {
+        size_t chunk_id = tid * chunks_per_thread + c;
+        size_t chunk_start = chunk_id * chunk_elems;
+        size_t chunk_end = min(chunk_start + chunk_elems, N);
+
+        // Sequential access with stride
+        for (size_t i = chunk_start; i < chunk_end; i += stride_elems) {
+            float val = input[i];
+            val = val * 1.5f + 2.0f;  // Light computation
+            output[i] = val;
+        }
+    }
+}
+```
+
+**内存布局**：
+- Input array: 50% of total_working_set
+- Output array: 50% of total_working_set
+- Stride: 4096B (page-level probing)
+
+**Bytes Accessed 计算**：
+```cpp
+size_t num_accesses = (N + stride_elems - 1) / stride_elems;
+if (stride_bytes >= 4096) {
+    // Page-level: count UVM migration bytes
+    size_t num_pages = num_accesses;
+    bytes_accessed = num_pages * 4096 * 2;  // input + output
+}
+```
+
+#### Kernel 2: Random Stream (`rand_stream`)
+
+**语义**：每个线程对自己 chunk 内的 pages 做无重复随机 permutation。
+
+**实现**：
+```cpp
+__global__ void rand_chunk_kernel(const float* input, float* output,
+                                  size_t N,
+                                  size_t chunk_elems,
+                                  int chunks_per_thread,
+                                  size_t stride_elems,
+                                  unsigned int base_seed) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned int seed = base_seed ^ tid;
+    size_t elems_per_page = 4096 / sizeof(float);
+
+    for (int c = 0; c < chunks_per_thread; ++c) {
+        size_t chunk_id = tid * chunks_per_thread + c;
+        size_t chunk_start = chunk_id * chunk_elems;
+        size_t pages_in_chunk = (chunk_size + elems_per_page - 1) / elems_per_page;
+
+        // Multiplicative congruential permutation (visit each page exactly once)
+        seed = lcg_random(seed);
+        size_t step = (seed | 1u);  // Ensure odd (coprime with power of 2)
+        size_t offset = lcg_random(seed ^ 0xDEADBEEF) % pages_in_chunk;
+
+        for (size_t p = 0; p < pages_in_chunk; ++p) {
+            size_t random_page = (offset + p * step) % pages_in_chunk;
+            size_t page_start = chunk_start + (random_page * elems_per_page);
+
+            // Access one element per page
+            float val = input[page_start];
+            val = val * 1.5f + 2.0f;
+            output[page_start] = val;
+        }
+    }
+}
+```
+
+**关键特性**：
+- 使用 `(offset + p * step) % pages_in_chunk` 实现无重复 permutation
+- `step` 为奇数，与 2^k 互质，保证覆盖所有 pages
+- 每个 page 恰好被访问 1 次，只是顺序被打散
+
+**Bytes Accessed 计算**：
+```cpp
+size_t total_pages = (N * sizeof(float) + 4095) / 4096;
+if (stride_bytes >= 4096) {
+    bytes_accessed = total_pages * 4096 * 2;  // input + output
+}
+```
+
+#### Kernel 3: Pointer Chase (`pointer_chase`)
+
+**语义**：每个线程在自己的 chunk 内追踪固定长度的依赖链，测量 latency micro。
+
+**数据结构**：
+```cpp
+struct Node {
+    unsigned int next;  // Index of next node
+    float data;
+    float padding[1];   // Align to 16 bytes
+};
+```
+
+**初始化（GPU-based）**：
+```cpp
+__global__ void init_chunks_kernel(Node* nodes, size_t nodes_per_chunk, int total_chunks) {
+    size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t stride = gridDim.x * blockDim.x;
+    size_t total_nodes = total_chunks * nodes_per_chunk;
+
+    for (size_t i = tid; i < total_nodes; i += stride) {
+        size_t chunk_id = i / nodes_per_chunk;
+
+        // Random next pointer WITHIN the same chunk
+        unsigned int r = lcg_random((unsigned int)i);
+        size_t next_offset = r % nodes_per_chunk;
+        size_t next_idx = chunk_id * nodes_per_chunk + next_offset;
+
+        nodes[i].next = (unsigned int)next_idx;
+        nodes[i].data = 1.0f;
+    }
+}
+```
+
+**Chase kernel**：
+```cpp
+__global__ void pointer_chunk_kernel(const Node* nodes, float* output,
+                                     size_t nodes_per_chunk,
+                                     int chunks_per_thread,
+                                     int chase_steps) {
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+    for (int c = 0; c < chunks_per_thread; ++c) {
+        size_t chunk_id = tid * chunks_per_thread + c;
+        size_t chunk_start = chunk_id * nodes_per_chunk;
+
+        unsigned int cur = (unsigned int)chunk_start;
+        float sum = 0.0f;
+
+        // Chase pointers (dependent loads)
+        #pragma unroll 4
+        for (int s = 0; s < chase_steps; ++s) {
+            sum += nodes[cur].data;
+            cur = nodes[cur].next;
+        }
+
+        output[chunk_id] = sum;
+    }
+}
+```
+
+**关键参数**：
+- `chase_steps = 8`：每个线程追踪的固定步数
+- `nodes_per_chunk`：向上对齐到页边界（4096 / sizeof(Node)）
+
+**内存布局**：
+- Nodes array: 90% of total_working_set
+- Output array: 10% of total_working_set
+
+**Bytes Accessed 计算**：
+```cpp
+// Fixed logical work: total_chunks * chase_steps accesses
+size_t logical_accesses = total_chunks * chunks_per_thread * chase_steps;
+size_t logical_bytes = logical_accesses * sizeof(Node);
+
+// Estimate pages touched
+size_t pages_touched = (logical_bytes + 4095) / 4096;
+size_t total_pages = (n_alloc * sizeof(Node) + 4095) / 4096;
+pages_touched = min(pages_touched, total_pages);
+
+bytes_accessed = pages_touched * 4096;
+```
+
+**注意**：Pointer chase 是 latency micro（固定工作量），不是 throughput micro（扫完整 WSS）。
 
 ---
 
-### 2.2 Tier‑1：real kernel family（和 SC’21 / UVMBench 一样的级别）
+### 1.2 Tier‑1：Real Kernel Family（和 SC'21 / UVMBench 一样的级别）
 
 这一层是重点，目标是用一批**覆盖不同 *memory behavior* 的真实 kernel**，但每个 kernel 本身足够小、单一：
 
-#### 2.2.1 Dense Linear Algebra：GEMM（高重用、高算密度）
+#### 1.2.1 Dense Linear Algebra：GEMM（高重用、高算密度）
 
 * 对应 SC’21 的 cuBLAS sgemm  和 UVMBench 里的 GEMM/SGEMM
 * 工作负载：
@@ -58,7 +251,7 @@ Tier‑0 synthetic 只用来给这几类 real kernel 找“解释工具”；**�
 
   * 这是 **“best‑case real kernel”**：算密度高、数据重用多，看 UVM 在极友好场景下的 overhead 下限。
 
-#### 2.2.2 Stencil / 2D/3D Convolution：高空间局部性、有限重用
+#### 1.2.2 Stencil / 2D/3D Convolution：高空间局部性、有限重用
 
 * 对应 UVMBench 里的 2DCONV/3DCONV、SC’21 的 Gauss‑Seidel / HPGMG‑FV。
 
@@ -81,7 +274,7 @@ Tier‑0 synthetic 只用来给这几类 real kernel 找“解释工具”；**�
   * 代表 HPC / PDE 类型应用：有空间局部性，但重用窗口远不及 GEMM；
   * 对 UVM 来说是中等难度 case。
 
-#### 2.2.3 Sparse Linear Algebra：SpMV / SpMM（典型 irregular）
+#### 1.2.3 Sparse Linear Algebra：SpMV / SpMM（典型 irregular）
 
 * 对应 UVMBench / SC 系列大量用的 SpMV、以及许多 graph/GNN 底层算子。
 * 工作负载：
@@ -104,7 +297,7 @@ Tier‑0 synthetic 只用来给这几类 real kernel 找“解释工具”；**�
   * 这是典型 **“TLB / page‑fault hell”**；
   * 跟 MGG 的 irregular graph pattern完全一脉相承，用来解释为什么 GNN + UVM 会被打爆。
 
-#### 2.2.4 Graph Traversal：BFS / PageRank（一阶 graph kernel）
+#### 1.2.4 Graph Traversal：BFS / PageRank（一阶 graph kernel）
 
 * 对应 UVMBench 的 BFS、SC/Graph500 测试中最常见的 kernel。
 * 工作负载：
@@ -124,7 +317,7 @@ Tier‑0 synthetic 只用来给这几类 real kernel 找“解释工具”；**�
   * 这就是 MGG 前面的“单 GPU graph kernel”版本；
   * 显示 UVM 在 neighbor‑exploration 上表现如何，对比 SpMV。
 
-#### 2.2.5 CNN 层 / Conv+BN+ReLU（DL 真实 kernel）
+#### 1.2.5 CNN 层 / Conv+BN+ReLU（DL 真实 kernel）
 
 * 对应 PipeSwitch/TGS 那种 DL 模型的基本 building block。
 * 工作负载：
@@ -146,11 +339,11 @@ Tier‑0 synthetic 只用来给这几类 real kernel 找“解释工具”；**�
 
 ---
 
-### 2.3 Tier‑2：领域特定 kernel（LLM / GNN）
+### 1.3 Tier‑2：领域特定 kernel（LLM / GNN）
 
 这一层用**简化但真实的“层”**，直接对上 InfiniGen / MGG 里的 evaluation 场景：
 
-#### 2.3.1 Transformer decoder block（LLM‑style KV heavy kernel）
+#### 1.3.1 Transformer decoder block（LLM‑style KV heavy kernel）
 
 * 对应 InfiniGen 的单层 KV cache 使用模式。
 * 工作负载：
@@ -169,7 +362,7 @@ Tier‑0 synthetic 只用来给这几类 real kernel 找“解释工具”；**�
   * 直接对应 InfiniGen 的 baseline：UVM 做 KV offloading。
   * 把 micro‑bench 跟完整 LLM 系统实验连起来。
 
-#### 2.3.2 GNN layer（GCN message passing）
+#### 1.3.2 GNN layer（GCN message passing）
 
 * 对应 MGG 的单层 GCN 聚合逻辑。
 * 工作负载：
@@ -190,7 +383,268 @@ Tier‑0 synthetic 只用来给这几类 real kernel 找“解释工具”；**�
 
 ---
 
-## 三、实验矩阵重写：real kernel 为主，synthetic 为辅
+## 二、Research Questions (RQ)
+
+### 2.1 概述
+
+这套 benchmark 最终要支撑的是类似这样的一组问题：
+
+* **RQ1：UVM vs Device Memory 性能对比** - 在真实 kernel 上，UVM 相对显式 GPU 内存管理的性能损失有多大？
+* **RQ2：访存模式影响** - UVM 在不同访存模式和计算强度的 kernel 上表现是否一致？
+* **RQ3：Oversubscription 行为** - 在 realistic oversubscription（1.0×–2.0× 显存）下，哪些 kernel 还能"勉强可用"，哪些直接被 thrash 掉？
+* **RQ4：Prefetch 效果** - 简单 prefetch（如 cudaMemPrefetchAsync）在 real kernel 上的收益/副作用有多大？
+
+Tier‑0 synthetic 只用来给这几类 real kernel 找"解释工具"；**所有结论必须在 Tier‑1/2 上复现**。
+
+---
+
+### 2.2 RQ1: UVM vs Device Memory Performance Comparison
+
+**目标**：量化 UVM 在 fits-in-memory 场景下的基础开销。
+
+**实验设计**：
+
+参数配置：
+```python
+KERNELS = ['seq_stream', 'rand_stream', 'pointer_chase']  # Tier-0
+MODES   = ['device', 'uvm']
+SIZE_FACTORS = [0.25, 0.5, 0.75]  # All fits in GPU memory
+STRIDE_BYTES = [4, 4096]  # Element-level vs Page-level
+ITERATIONS = 5
+```
+
+对比维度：
+- **Mode**: device (cudaMalloc + memcpy) vs uvm (cudaMallocManaged, no prefetch)
+- **Access Pattern**: sequential, random, pointer-chase
+- **Stride**: 4B (element) vs 4096B (page)
+
+输出指标：
+```csv
+kernel,mode,size_factor,stride_bytes,median_ms,min_ms,max_ms,bytes_accessed,bw_GBps
+```
+
+**可视化**：
+
+图 RQ1-1: Slowdown vs Access Pattern
+- X 轴: kernel × stride
+- Y 轴: Slowdown (UVM / Device)
+- 每组两个 bar: stride=4B, stride=4096B
+- Size factor 固定在 0.5x
+
+图 RQ1-2: Throughput Comparison
+- X 轴: Size Factor
+- Y 轴: Bandwidth (GB/s)
+- 曲线: device vs uvm，每个 kernel 单独一张子图
+- 3×2 布局
+
+**输出文件**：
+- `rq1_results.csv`
+- `rq1_mode_comparison.{pdf,png}`
+
+---
+
+### 2.3 RQ2: Access Pattern Impact
+
+**目标**：理解不同访存模式对 UVM 性能的影响。
+
+**实验设计**：
+
+参数配置：
+```python
+KERNELS = ['seq_stream', 'rand_stream', 'pointer_chase']
+MODES   = ['uvm']  # 只关注 UVM
+SIZE_FACTORS = [0.5]  # 固定 fits-in
+STRIDE_BYTES = [4, 16, 64, 256, 1024, 4096]  # 扫描不同访问粒度
+ITERATIONS = 5
+```
+
+对比维度：
+- **Stride**: 从 element-level (4B) 到 page-level (4096B)
+- **Pattern**: seq vs random vs pointer-chase
+
+输出指标：
+```csv
+kernel,stride_bytes,median_ms,bw_GBps,pages_touched,page_faults
+```
+
+**可视化**：
+
+图 RQ2-1: Bandwidth vs Stride
+- X 轴: Stride (bytes)，对数刻度
+- Y 轴: Bandwidth (GB/s)
+- 曲线: 三种 kernel
+- 垂直线标记: 4096B (page boundary)
+
+图 RQ2-2: Pattern Characterization
+- 热力图: kernel × stride，颜色表示 normalized bandwidth
+
+**输出文件**：
+- `rq2_results.csv`
+- `rq2_access_pattern.{pdf,png}`
+
+---
+
+### 2.4 RQ3: Oversubscription Behavior (当前 T0-RQ3 实现)
+
+**目标**：表征 UVM 在 oversubscription 下的性能退化行为。
+
+**实验设计**：
+
+参数配置：
+```python
+KERNELS = ['seq_stream', 'rand_stream', 'pointer_chase']
+MODES   = ['device', 'uvm']
+SIZE_FACTORS = [0.5, 0.75, 1.0, 1.25, 1.5]  # 覆盖 fits-in 到 oversub
+BASELINE_SF = 0.5  # Baseline for normalization
+STRIDE_BYTES = 4096  # 统一使用 page-level，公平对比
+ITERATIONS = 3
+```
+
+**Size Factor 定义**：
+- `total_working_set = size_factor × GPU_memory`
+- 0.5x, 0.75x: fits-in memory (baseline)
+- 1.0x: exactly at capacity
+- 1.25x, 1.5x: oversubscription
+
+**Mode 说明**：
+- `device`: cudaMalloc + explicit memcpy (只跑 ≤0.8x，避免 OOM)
+- `uvm`: cudaMallocManaged，无 prefetch
+
+执行流程：
+```python
+for kernel in KERNELS:
+    for mode in MODES:
+        for size_factor in SIZE_FACTORS:
+            # Skip device mode for oversubscription
+            if mode == 'device' and size_factor > 0.8:
+                continue
+
+            run_benchmark(
+                kernel=kernel,
+                mode=mode,
+                size_factor=size_factor,
+                stride_bytes=4096,
+                iterations=3
+            )
+```
+
+每个配置运行流程：
+1. Warmup: 2 iterations
+2. Timed: 3 iterations
+3. 统计: median, min, max runtime
+
+输出指标：
+```csv
+kernel,mode,size_factor,stride_bytes,median_ms,min_ms,max_ms,bytes_accessed,bw_GBps
+```
+
+其中：
+- `median_ms`: 中位数运行时间
+- `bytes_accessed`: 基于 stride 和访问模式的逻辑字节数
+- `bw_GBps`: `bytes_accessed / (median_ms / 1000)`
+
+**可视化**：
+
+图 RQ3-1: Runtime vs Size Factor (per kernel)
+
+布局：3 行 × 2 列（每个 kernel 一行）
+
+左列 - Runtime (Log Scale)：
+- X 轴: Size Factor (× GPU Memory)
+- Y 轴: Median Runtime (ms)，对数刻度
+- 曲线: device vs uvm
+- 垂直线: 1.0x 处标记 "GPU capacity"
+
+右列 - Normalized Throughput：
+- X 轴: Size Factor (× GPU Memory)
+- Y 轴: Normalized Throughput (vs Device @ 0.5x)
+- 计算: `norm_bw = current_bw / baseline_bw`
+- 水平线: 1.0 处标记 baseline
+- 垂直线: 1.0x 处标记 "GPU capacity"
+
+图 RQ3-2: Summary Statistics Table
+
+```
+=================================================================
+T0-RQ3 SUMMARY: Oversubscription with Page-Level Probing
+=================================================================
+Configuration: stride_bytes=4096 (page-level), iterations=3
+
+Sequential Stream:
+-----------------------------------------------------------------
+  UVM at 1.0x: XXX.XXXms (XX.XXx vs 0.5x)
+  UVM at 1.25x: XXXX.XXXms (XXX.XXx vs 0.5x)
+  UVM at 1.5x: XXXX.XXXms (XXX.XXx vs 0.5x)
+
+Random Stream:
+-----------------------------------------------------------------
+  UVM at 1.0x: XXX.XXXms (XX.XXx vs 0.5x)
+  ...
+
+Pointer Chase:
+-----------------------------------------------------------------
+  UVM at 1.0x: X.XXXms (XX.XXx vs 0.5x)
+  ...
+```
+
+Slowdown 计算：
+```python
+uvm_base = kdf[(kdf['mode'] == 'uvm') &
+               (kdf['size_factor'] == BASELINE_SF)]
+uvm_at_t = kdf[(kdf['mode'] == 'uvm') &
+               (kdf['size_factor'] == threshold)]
+
+slowdown = uvm_at_t['median_ms'] / uvm_base['median_ms']
+```
+
+**输出文件**：
+- `t0rq3_results.csv`: 所有配置的原始数据
+- `t0rq3_oversub_page_stride.{pdf,png}`: 可视化图表
+
+---
+
+### 2.5 RQ4: Prefetch Effectiveness
+
+**目标**：评估 cudaMemPrefetchAsync 对不同访问模式的影响。
+
+**实验设计**：
+
+参数配置：
+```python
+KERNELS = ['seq_stream', 'rand_stream', 'pointer_chase']
+MODES   = ['uvm', 'uvm_prefetch']
+SIZE_FACTORS = [0.5, 1.0, 1.25]
+STRIDE_BYTES = 4096
+ITERATIONS = 5
+```
+
+对比维度：
+- **Prefetch**: 无 prefetch vs prefetch all to GPU
+- **Size Factor**: fits-in (0.5x) vs at-capacity (1.0x) vs oversub (1.25x)
+
+输出指标：
+```csv
+kernel,mode,size_factor,median_ms,prefetch_overhead_ms,speedup
+```
+
+**可视化**：
+
+图 RQ4-1: Prefetch Speedup
+- X 轴: Size Factor
+- Y 轴: Speedup (uvm_prefetch / uvm)
+- 曲线: 三种 kernel
+- 水平线: speedup=1.0
+
+图 RQ4-2: Overhead Breakdown
+- 堆叠柱状图: prefetch overhead + kernel runtime
+
+**输出文件**：
+- `rq4_results.csv`
+- `rq4_prefetch_effect.{pdf,png}`
+
+---
+
+## 三、实验矩阵：real kernel 为主，synthetic 为辅
 
 ### 3.1 维度 1：内存模式（还是那四个）
 

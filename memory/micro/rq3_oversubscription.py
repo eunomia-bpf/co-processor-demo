@@ -183,7 +183,7 @@ def plot_results(df):
             uvm_at_t = kdf[(kdf['mode'] == 'uvm') &
                            (kdf['size_factor'] == threshold)]
             uvm_base = kdf[(kdf['mode'] == 'uvm') &
-                           (kdf['size_factor'] == 0.25)]
+                           (kdf['size_factor'] == BASELINE_SF)]
 
             if not uvm_at_t.empty and not uvm_base.empty:
                 time_t = uvm_at_t['median_ms'].values[0]
@@ -191,7 +191,7 @@ def plot_results(df):
                 slowdown = time_t / time_b
 
                 print(f"  UVM at {threshold}x: {time_t:.3f}ms "
-                      f"({slowdown:.2f}x vs 0.25x)")
+                      f"({slowdown:.2f}x vs {BASELINE_SF}x)")
 
     print("\n" + "="*80)
     print("KEY FINDINGS:")
