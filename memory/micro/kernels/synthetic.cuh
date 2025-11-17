@@ -33,6 +33,12 @@ struct KernelResult {
 template <typename LaunchFunc>
 inline void time_kernel(LaunchFunc launch_kernel, int warmup_iterations, int timed_iterations,
                         std::vector<float>& runtimes, KernelResult& result) {
+    // Defensive check for invalid iterations
+    if (timed_iterations <= 0) {
+        result.median_ms = result.min_ms = result.max_ms = 0.0f;
+        return;
+    }
+
     // Warmup
     for (int i = 0; i < warmup_iterations; ++i) {
         launch_kernel();
@@ -204,6 +210,10 @@ inline void run_rand_stream(size_t total_working_set, const std::string& mode, s
     // Ensure n_indices matches n (kernel expects this)
     n_indices = n;
     indices_bytes = n * sizeof(unsigned int);
+
+    // Update input/output bytes to match actual n
+    input_bytes = n * sizeof(float);
+    output_bytes = n * sizeof(float);
 
     // Sanity check for device mode
     if (mode == "device") {
