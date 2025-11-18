@@ -1,5 +1,8 @@
 # Executables
 gemm_test
+gemm_test_modify
+gemm_test_ultra_minimal
+vec_add_test
 
 # CUDA artifacts
 *.ptx

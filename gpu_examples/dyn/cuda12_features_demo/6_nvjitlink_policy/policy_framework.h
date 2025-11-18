@@ -203,15 +203,17 @@ public:
         return true;
     }
 
-    bool launch(dim3 gridDim, dim3 blockDim, cudaStream_t stream,
-                float *d_A, float *d_B, float *d_C,
-                int M, int N, int K, float alpha, float beta) {
+    // Generic launch method - works with ANY kernel signature!
+    // Uses variadic templates to accept any number/type of parameters
+    template<typename... Args>
+    bool launch(dim3 gridDim, dim3 blockDim, cudaStream_t stream, Args... args) {
         if (!linked) {
             fprintf(stderr, "Framework not linked! Call link() first.\n");
             return false;
         }
 
-        void* params[] = {&d_A, &d_B, &d_C, &M, &N, &K, &alpha, &beta, &h_policy_func_ptr};
+        // Create a tuple of pointers to all arguments plus the policy function pointer
+        void* params[] = {(void*)&args..., &h_policy_func_ptr};
 
         CHECK_CU(cuLaunchKernel(kernelFunc,
                                gridDim.x, gridDim.y, gridDim.z,
@@ -222,22 +224,95 @@ public:
         return true;
     }
 
+    // Legacy launch method for GEMM (for backward compatibility)
+    bool launch_gemm(dim3 gridDim, dim3 blockDim, cudaStream_t stream,
+                float *d_A, float *d_B, float *d_C,
+                int M, int N, int K, float alpha, float beta) {
+        return launch(gridDim, blockDim, stream, d_A, d_B, d_C, M, N, K, alpha, beta);
+    }
+
     void getModule(CUmodule* mod) {
         *mod = module;
     }
 };
 
 // ========================================
-// Generic Wrapper Kernel Template (device code)
+// CONVENIENCE MACROS - Hide all boilerplate!
+// ========================================
+
+// MACRO: Setup policy framework with error handling
+// Usage: POLICY_FRAMEWORK_SETUP(framework_var, kernel_ptx, policy_ptx, compute_major, compute_minor)
+#define POLICY_FRAMEWORK_SETUP(fw, kernel_ptx, policy_ptx, major, minor) \
+    PolicyFramework fw; \
+    do { \
+        if (!fw.loadUserKernel(kernel_ptx)) { \
+            fprintf(stderr, "Failed to load user kernel: %s\n", kernel_ptx); \
+            exit(EXIT_FAILURE); \
+        } \
+        if (!fw.loadPolicy(policy_ptx)) { \
+            fprintf(stderr, "Failed to load policy: %s\n", policy_ptx); \
+            exit(EXIT_FAILURE); \
+        } \
+        if (!fw.link(major, minor)) { \
+            fprintf(stderr, "Failed to link framework\n"); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while(0)
+
+// MACRO: Setup policy framework with automatic device detection
+// Usage: POLICY_FRAMEWORK_SETUP_AUTO(framework_var, kernel_ptx, policy_ptx)
+#define POLICY_FRAMEWORK_SETUP_AUTO(fw, kernel_ptx, policy_ptx) \
+    int device_##fw = 0; \
+    cudaDeviceProp prop_##fw; \
+    cudaGetDeviceProperties(&prop_##fw, device_##fw); \
+    POLICY_FRAMEWORK_SETUP(fw, kernel_ptx, policy_ptx, prop_##fw.major, prop_##fw.minor)
+
+// MACRO: Get device properties (needed for manual setup)
+#define GET_DEVICE_PROPS(prop_var, device_var) \
+    int device_var = 0; \
+    cudaDeviceProp prop_var; \
+    cudaGetDeviceProperties(&prop_var, device_var)
+
+// ========================================
+// USAGE EXAMPLES:
 // ========================================
 //
-// This provides a GENERIC TEMPLATE for wrapping ANY CUDA kernel with a policy function.
-// No need to manually write wrappers anymore!
+// Example 1: Automatic setup (easiest)
+// ------------------------------------
+//   POLICY_FRAMEWORK_SETUP_AUTO(framework, "kernel.ptx", "policy.ptx");
+//   framework.launch(grid, block, 0, args...);
 //
-// USAGE:
-// 1. Define your kernel as a __device__ function
-// 2. Use DEFINE_POLICY_WRAPPER macro to create the wrapper
-// 3. Done! The wrapper is automatically generated.
+// Example 2: Manual setup (more control)
+// --------------------------------------
+//   GET_DEVICE_PROPS(prop, device);
+//   printf("Device: %s\n", prop.name);
+//   POLICY_FRAMEWORK_SETUP(framework, "kernel.ptx", "policy.ptx", prop.major, prop.minor);
+//   framework.launch(grid, block, 0, args...);
+//
+// Example 3: Inline setup and launch (most compact)
+// -------------------------------------------------
+//   POLICY_FRAMEWORK_SETUP_AUTO(fw, "kernel.ptx", "policy.ptx");
+//   fw.launch(grid, block, 0, a, b, c, n);
+//
+
+// ========================================
+// MACRO-BASED GENERIC POLICY FRAMEWORK
+// ========================================
+//
+// This provides MACROS for wrapping ANY CUDA kernel with minimal code changes.
+// Works with GEMM, vec_add, or ANY custom kernel!
+//
+// USAGE - Only 2 changes to your original code:
+//
+// 1. Change kernel declaration:
+//    FROM: __global__ void my_kernel(args...)
+//    TO:   POLICY_KERNEL_DECL(my_kernel, args...)
+//
+// 2. Change kernel launch:
+//    FROM: my_kernel<<<grid, block>>>(args...);
+//    TO:   POLICY_KERNEL_LAUNCH(my_kernel, grid, block, args...);
+//
+// That's it! The macros handle everything else automatically.
 //
 // ========================================
 
@@ -268,27 +343,79 @@ __device__ void apply_policy_wrapper(KernelPtr kernel_impl,
 }
 
 // ========================================
-// Example instantiation - GEMM kernel wrapper
+// MACRO SYSTEM - Minimal code changes needed!
+// ========================================
+
+// MACRO 1: Declare a policy-enabled kernel
+// Usage: POLICY_KERNEL_DECL(kernel_name, param1_type param1_name, param2_type param2_name, ...)
+//
+// Example:
+//   Original: __global__ void gemm_kernel(float *A, float *B, float *C, int M, int N, int K, float alpha, float beta)
+//   With policy: POLICY_KERNEL_DECL(gemm_kernel, float *A, float *B, float *C, int M, int N, int K, float alpha, float beta)
+//
+#define POLICY_KERNEL_DECL(kernel_name, ...) \
+    __device__ void kernel_name##_impl(__VA_ARGS__); \
+    extern "C" __global__ void kernel_name##_with_policy(__VA_ARGS__, policy_func_t policy_func) { \
+        apply_policy_wrapper(kernel_name##_impl, policy_func, ##__VA_ARGS__); \
+    } \
+    __device__ void kernel_name##_impl(__VA_ARGS__)
+
+// MACRO 2: Original kernel declaration (when not using policy)
+// This allows you to keep the original __global__ kernel for direct launch
+#define POLICY_KERNEL_DECL_WITH_ORIGINAL(kernel_name, ...) \
+    __device__ void kernel_name##_impl(__VA_ARGS__); \
+    __global__ void kernel_name(__VA_ARGS__) { \
+        kernel_name##_impl(__VA_ARGS__); \
+    } \
+    extern "C" __global__ void kernel_name##_with_policy(__VA_ARGS__, policy_func_t policy_func) { \
+        apply_policy_wrapper(kernel_name##_impl, policy_func, ##__VA_ARGS__); \
+    } \
+    __device__ void kernel_name##_impl(__VA_ARGS__)
+
+// ========================================
+// Example Usage with Different Kernels
 // ========================================
 //
-// To create a wrapper for YOUR kernel:
-// 1. Declare your kernel_impl as extern "C" __device__
-// 2. Create a __global__ wrapper that calls apply_policy_wrapper with your kernel_impl
-// 3. That's it! The template handles the rest.
+// EXAMPLE 1: GEMM Kernel
+// ----------------------
+// Original code:
+//   __global__ void gemm_kernel(float *A, float *B, float *C, int M, int N, int K, float alpha, float beta) {
+//       // kernel body
+//   }
 //
-// Example for a vector add kernel:
+// With policy support (ONE line change):
+//   POLICY_KERNEL_DECL(gemm_kernel, float *A, float *B, float *C, int M, int N, int K, float alpha, float beta) {
+//       // kernel body - UNCHANGED!
+//   }
 //
-//   extern "C" __device__ void vector_add_impl(float *a, float *b, float *c, int n);
+// EXAMPLE 2: Vector Add Kernel
+// -----------------------------
+// Original code:
+//   __global__ void vec_add(float *a, float *b, float *c, int n) {
+//       // kernel body
+//   }
 //
-//   extern "C" __global__ void vector_add_with_policy(float *a, float *b, float *c,
-//                                                      int n,
-//                                                      policy_func_t policy_func) {
-//       apply_policy_wrapper(vector_add_impl, policy_func, a, b, c, n);
+// With policy support (ONE line change):
+//   POLICY_KERNEL_DECL(vec_add, float *a, float *b, float *c, int n) {
+//       // kernel body - UNCHANGED!
+//   }
+//
+// EXAMPLE 3: Matrix Transpose Kernel
+// -----------------------------------
+// Original code:
+//   __global__ void transpose(float *in, float *out, int width, int height) {
+//       // kernel body
+//   }
+//
+// With policy support (ONE line change):
+//   POLICY_KERNEL_DECL(transpose, float *in, float *out, int width, int height) {
+//       // kernel body - UNCHANGED!
 //   }
 //
 // ========================================
 
 // External reference to user's GEMM kernel implementation
+// (This is auto-generated by the POLICY_KERNEL_DECL macro in gemm_test.cu)
 extern "C" __device__ void gemm_kernel_impl(float *A, float *B, float *C,
                                              int M, int N, int K,
                                              float alpha, float beta);
