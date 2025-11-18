@@ -43,6 +43,7 @@ private:
     CUmodule module;
     CUfunction kernelFunc;
     bool linked;
+    void* h_policy_func_ptr;  // Host-side copy of device function pointer
 
     std::vector<char> readFile(const char* filename) {
         std::ifstream file(filename, std::ios::binary | std::ios::ate);
@@ -64,7 +65,7 @@ private:
     }
 
 public:
-    PolicyFramework() : module(nullptr), kernelFunc(nullptr), linked(false) {
+    PolicyFramework() : module(nullptr), kernelFunc(nullptr), linked(false), h_policy_func_ptr(nullptr) {
         CHECK_CU(cuInit(0));
     }
 
@@ -80,6 +81,10 @@ public:
         if (userPTX.empty()) {
             return false;
         }
+        // Ensure null terminator for PTX
+        if (userPTX.back() != '\0') {
+            userPTX.push_back('\0');
+        }
         std::cout << "✓ Loaded user kernel PTX (" << userPTX.size() << " bytes)" << std::endl;
         return true;
     }
@@ -89,6 +94,10 @@ public:
         policyPTX = readFile(ptxFile);
         if (policyPTX.empty()) {
             return false;
+        }
+        // Ensure null terminator for PTX
+        if (policyPTX.back() != '\0') {
+            policyPTX.push_back('\0');
         }
         std::cout << "✓ Loaded policy PTX (" << policyPTX.size() << " bytes)" << std::endl;
         return true;
@@ -119,14 +128,26 @@ public:
         std::cout << "  Options: " << options[0] << " " << options[1] << std::endl;
 
         // Add user kernel PTX (includes wrapper)
-        CHECK_NVJITLINK(nvJitLinkAddData(handle, NVJITLINK_INPUT_PTX,
-                                         userPTX.data(), userPTX.size(),
-                                         "user_kernel"));
+        std::cout << "Adding user kernel PTX (" << userPTX.size() << " bytes)..." << std::endl;
+        nvJitLinkResult result1 = nvJitLinkAddData(handle, NVJITLINK_INPUT_PTX,
+                                         (void*)userPTX.data(), userPTX.size(),
+                                         "user_kernel");
+        if (result1 != NVJITLINK_SUCCESS) {
+            fprintf(stderr, "nvJitLink error code: %d\n", result1);
+            size_t logSize;
+            if (nvJitLinkGetErrorLogSize(handle, &logSize) == NVJITLINK_SUCCESS && logSize > 0) {
+                std::vector<char> log(logSize);
+                nvJitLinkGetErrorLog(handle, log.data());
+                fprintf(stderr, "Error log:\n%s\n", log.data());
+            }
+            nvJitLinkDestroy(&handle);
+            return false;
+        }
         std::cout << "✓ Added user kernel PTX (includes wrapper)" << std::endl;
 
         // Add policy PTX
         CHECK_NVJITLINK(nvJitLinkAddData(handle, NVJITLINK_INPUT_PTX,
-                                         policyPTX.data(), policyPTX.size(),
+                                         (void*)policyPTX.data(), policyPTX.size(),
                                          "policy"));
         std::cout << "✓ Added policy PTX" << std::endl;
 
@@ -166,6 +187,18 @@ public:
         CHECK_CU(cuModuleGetFunction(&kernelFunc, module, "gemm_with_policy"));
         std::cout << "✓ Got wrapped kernel function" << std::endl;
 
+        // Get the device policy function pointer and copy to host
+        CUdeviceptr d_policy_func_ptr_addr;
+        size_t size;
+        CUresult res = cuModuleGetGlobal(&d_policy_func_ptr_addr, &size, module, "d_apply_policy");
+        if (res == CUDA_SUCCESS) {
+            CHECK_CU(cuMemcpyDtoH(&h_policy_func_ptr, d_policy_func_ptr_addr, sizeof(void*)));
+            std::cout << "✓ Got policy function pointer" << std::endl;
+        } else {
+            std::cout << "Note: No policy function pointer found, will use nullptr" << std::endl;
+            h_policy_func_ptr = nullptr;
+        }
+
         linked = true;
         return true;
     }
@@ -178,7 +211,7 @@ public:
             return false;
         }
 
-        void* params[] = {&d_A, &d_B, &d_C, &M, &N, &K, &alpha, &beta};
+        void* params[] = {&d_A, &d_B, &d_C, &M, &N, &K, &alpha, &beta, &h_policy_func_ptr};
 
         CHECK_CU(cuLaunchKernel(kernelFunc,
                                gridDim.x, gridDim.y, gridDim.z,
@@ -188,35 +221,45 @@ public:
 
         return true;
     }
+
+    void getModule(CUmodule* mod) {
+        *mod = module;
+    }
 };
 
 // ========================================
 // Generic Wrapper Kernel (device code)
 // ========================================
-// Only compile when generating PTX, not for main executable
 
-#if defined(__CUDACC__) && !defined(HOST_COMPILE)
+#ifdef __CUDACC__
 
 // External reference to user's kernel implementation
 extern "C" __device__ void gemm_kernel_impl(float *A, float *B, float *C,
                                              int M, int N, int K,
                                              float alpha, float beta);
 
-// External reference to policy function
-extern "C" __device__ void apply_policy(float *C, int M, int N);
+// Function pointer type for policy
+typedef void (*policy_func_t)(int);
 
 // Wrapper kernel that combines user kernel with policy
 extern "C" __global__ void gemm_with_policy(float *A, float *B, float *C,
                                             int M, int N, int K,
-                                            float alpha, float beta) {
+                                            float alpha, float beta,
+                                            policy_func_t policy_func) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int idx = row * N + col;
+
     // Call original user kernel
     gemm_kernel_impl(A, B, C, M, N, K, alpha, beta);
 
     // Synchronize before applying policy
     __syncthreads();
 
-    // Apply policy
-    apply_policy(C, M, N);
+    // Apply policy with matrix info
+    if (row < M && col < N && policy_func != nullptr) {
+        policy_func(idx);
+    }
 }
 
-#endif // defined(__CUDACC__) && !defined(HOST_COMPILE)
+#endif // __CUDACC__

@@ -8,7 +8,7 @@ all: gemm_test ptx
 
 # Main executable
 gemm_test: gemm_test.cu policy_framework.h
-	$(NVCC) $(NVCC_FLAGS) -DHOST_COMPILE $< -o $@ -lcuda -lnvJitLink
+	$(NVCC) $(NVCC_FLAGS) $< -o $@ -lcuda -lnvJitLink
 
 # Generate PTX files for runtime linking
 ptx: user_kernel.ptx policy.ptx
@@ -20,7 +20,7 @@ policy.ptx: policy.cu
 	$(NVCC) $(PTX_FLAGS) -ptx $< -o $@
 
 clean:
-	rm -f gemm_test *.ptx *.cubin
+	rm -f gemm_test *.ptx *.cubin *.o
 
 run: all
 	./gemm_test

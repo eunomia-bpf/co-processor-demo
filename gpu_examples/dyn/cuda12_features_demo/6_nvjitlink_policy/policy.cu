@@ -1,14 +1,19 @@
 // policy.cu
-// Policy device function - increment counter
+// Policy device function
 
 #include <cuda_runtime.h>
 
-// Policy function: increment counter
-extern "C" __device__ void apply_policy(float *C, int M, int N) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
+// Device counter to track how many times policy was called
+__device__ int policy_call_count = 0;
 
-    if (row < M && col < N) {
-        C[row * N + col] += 1.0f;
-    }
+// Policy function: increment counter
+extern "C" __device__ void apply_policy_impl(int idx) {
+    // Atomically increment the global counter
+    atomicAdd(&policy_call_count, 1);
 }
+
+// Function pointer type
+typedef void (*policy_func_t)(int);
+
+// Static device pointer to the policy function
+extern "C" __device__ policy_func_t d_apply_policy = apply_policy_impl;

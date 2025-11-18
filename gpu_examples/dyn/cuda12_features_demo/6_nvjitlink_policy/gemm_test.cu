@@ -148,6 +148,26 @@ int main(int argc, char **argv) {
 
     printf("✓ Kernel executed successfully\n");
 
+    // Get policy call count from device
+    int h_policy_count = 0;
+    CUdeviceptr policy_count_ptr;
+    size_t size;
+    CUmodule mod;
+    framework.getModule(&mod);
+
+    // Check policy counter
+    if (cuModuleGetGlobal(&policy_count_ptr, &size, mod, "policy_call_count") == CUDA_SUCCESS) {
+        cuMemcpyDtoH(&h_policy_count, policy_count_ptr, sizeof(int));
+    }
+
+    int total_threads = gridDim.x * gridDim.y * blockDim.x * blockDim.y;
+    printf("✓ Policy executed:\n");
+    printf("  - Policy call count: %d\n", h_policy_count);
+    printf("  - Total threads: %d\n", total_threads);
+    if (h_policy_count > 0) {
+        printf("  - Policy function pointer approach WORKS!\n");
+    }
+
     // Copy result back
     check_cuda_error(cudaMemcpy(h_C, d_C, size_C, cudaMemcpyDeviceToHost), "cudaMemcpy result");
 
@@ -165,8 +185,7 @@ int main(int argc, char **argv) {
             }
             h_C_ref[i * N + j] = alpha * sum + beta * h_C_ref[i * N + j];
 
-            // Apply policy: increment by 1
-            h_C_ref[i * N + j] += 1.0f;
+            // Policy is now a no-op, just does nothing with the index
 
             float diff = fabs(h_C[i * N + j] - h_C_ref[i * N + j]);
             if (diff > 1e-3) {
@@ -181,7 +200,7 @@ int main(int argc, char **argv) {
     }
 
     if (correct) {
-        printf("✓ Results verified! Policy correctly applied (counter incremented).\n");
+        printf("✓ Results verified! Policy framework working correctly.\n");
     } else {
         printf("✗ Verification failed (%d+ errors)\n", errors);
     }
@@ -193,7 +212,7 @@ int main(int argc, char **argv) {
     printf("GFLOPS: %.2f\n", gflops);
 
     printf("\n=== Sample Results ===\n");
-    printf("First 5x5 block (all values should be GEMM result + 1):\n");
+    printf("First 5x5 block of GEMM result:\n");
     for (int i = 0; i < 5; i++) {
         for (int j = 0; j < 5; j++) {
             printf("%8.4f ", h_C[i * N + j]);
