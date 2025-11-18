@@ -242,9 +242,15 @@ void free_transformer(Transformer *t) {
 }
 
 // load the GGUF config file
-void load_config(Transformer *t) {
-    FILE *f = fopen("header.txt", "r");
-    if (!f) {perror("Failed to open header.txt"); exit(1);}
+void load_config(Transformer *t, const char *model_dir) {
+    char header_path[2048];
+    snprintf(header_path, sizeof(header_path), "%s/header.txt", model_dir);
+    FILE *f = fopen(header_path, "r");
+    if (!f) {
+        fprintf(stderr, "Failed to open %s\n", header_path);
+        perror("fopen");
+        exit(1);
+    }
 
     char line[512];
     int line_num = 0;
@@ -924,9 +930,13 @@ int match_special_token(const char *str, int *match_len) {
     return -1;
 }
 
-void build_tokenizer(Tokenizer* t) {
-    load_vocab("vocab.txt");
-    load_merges("merges.txt");
+void build_tokenizer(Tokenizer* t, const char *model_dir) {
+    char vocab_path[2048];
+    char merges_path[2048];
+    snprintf(vocab_path, sizeof(vocab_path), "%s/vocab.txt", model_dir);
+    snprintf(merges_path, sizeof(merges_path), "%s/merges.txt", model_dir);
+    load_vocab(vocab_path);
+    load_merges(merges_path);
     init_byte_unicode_map();
 }    
  
@@ -1251,8 +1261,11 @@ void chat(Transformer* transformer, Tokenizer* tokenizer, Sampler* sampler, char
     int token;       // stores the current token to feed into the transformer
     //int prev_token;
     int pos = 0;     // position in the sequence
+    long start_time = 0;      // Start time for TTFT
+    long first_token_time = 0; // Time when first token is generated
     double timer = -1.0;   // TPS timer start
     int count = 0;         // decoded token
+    int generated_tokens = 0; // Count of generated tokens
 
      while (1) {
         if (user_turn) {
@@ -1294,7 +1307,7 @@ void chat(Transformer* transformer, Tokenizer* tokenizer, Sampler* sampler, char
             // encode the rendered prompt into tokens
             encode(tokenizer, rendered_prompt, prompt_tokens, &num_prompt_tokens, multi_turn);
             pos = 0; // reset the user index
-            user_turn = 0;  
+            user_turn = 0;
             if (multi_turn) {
             append_tokens(tb, prompt_tokens, num_prompt_tokens);
                 for (size_t i = 0; i < tb->size; i++) {
@@ -1303,6 +1316,8 @@ void chat(Transformer* transformer, Tokenizer* tokenizer, Sampler* sampler, char
                 printf("\n");
             }
             printf("A: ");
+            start_time = time_in_ms(); // Start timing
+            generated_tokens = 0; // Reset generated tokens counter
         }
 
         if (pos < (multi_turn ? tb->size : num_prompt_tokens)) {
@@ -1328,12 +1343,20 @@ void chat(Transformer* transformer, Tokenizer* tokenizer, Sampler* sampler, char
                 printf("\n");
                 user_turn = 1;
 
-                // TPS
-                if (tps) {
-                fprintf(stderr, "tok/s: %f\n", count / (double)(time_in_ms() - timer) * 1000);
+                // Print metrics (always enabled now)
+                if (generated_tokens > 0) {
+                    long end_time = time_in_ms();
+                    double ttft = (first_token_time - start_time) / 1000.0;
+                    double total_time = (end_time - first_token_time) / 1000.0;
+                    double tokens_per_sec = total_time > 0 ? generated_tokens / total_time : 0;
+
+                    fprintf(stderr, "\nTTFT: %.3f s\n", ttft);
+                    fprintf(stderr, "Generated tokens: %d\n", generated_tokens);
+                    fprintf(stderr, "Tokens per second: %.2f tok/s\n", tokens_per_sec);
+                }
+
                 timer = -1;
                 count = 0;
-                }
 
                 // Exit after single prompt
                 if (single_prompt) {
@@ -1346,11 +1369,17 @@ void chat(Transformer* transformer, Tokenizer* tokenizer, Sampler* sampler, char
             fflush(stdout);
             free(decoded);
 
-                if (tps) {
-                    count += 1;
-                    // timer starts after the first token generation
-                    if (timer == -1.0) {timer = time_in_ms();}
-                }
+            // Track metrics
+            if (generated_tokens == 0) {
+                first_token_time = time_in_ms();
+            }
+            generated_tokens++;
+
+            if (tps) {
+                count += 1;
+                // timer starts after the first token generation
+                if (timer == -1.0) {timer = time_in_ms();}
+            }
             }
         }
     }
@@ -1366,9 +1395,9 @@ void error_usage() {
     fprintf(stderr, "  -t <float>  temperature in [0,inf], default 0.6\n");
     fprintf(stderr, "  -p <float>  p value in top-p (nucleus) sampling in [0,1] default 0.95\n");
     fprintf(stderr, "  -s <int>    random seed, default time(NULL)\n");
-    fprintf(stderr, "  -m <int>    multi-turn: 0 = off (defualt), 1 = on\n");
-    fprintf(stderr, "  -k <int>    reasoning: 0 = off (defualt), 1 = on\n");
-    fprintf(stderr, "  -r <int>    TPS: 0 = off (defualt), 1 = on\n");
+    fprintf(stderr, "  -m <int>    multi-turn: 0 = off (default), 1 = on\n");
+    fprintf(stderr, "  -k <int>    reasoning: 0 = off (default), 1 = on\n");
+    fprintf(stderr, "  -r <int>    TPS: 0 = off, 1 = on (default)\n");
     fprintf(stderr, "  -q <string> single prompt mode (run once and exit)\n");
     exit(EXIT_FAILURE);
 }
@@ -1385,7 +1414,7 @@ int main(int argc, char *argv[]) {
     char *system_prompt = NULL; // the (optional) system prompt to use in chat mode
     int multi_turn = 0;  // multi-turn conversation
     int think_on = 0;    //  reasoning on
-    int tps = 0;         // TPS
+    int tps = 1;         // TPS - enabled by default
     int single_prompt = 0; // single prompt mode
 
     if (argc >= 2) { checkpoint_path = argv[1]; } else { error_usage(); }
@@ -1414,16 +1443,27 @@ int main(int argc, char *argv[]) {
     if (topp < 0.0 || 1.0 < topp) topp = 0.9;
     if (steps < 0) steps = 0;
 
+    // Extract directory from checkpoint_path
+    char model_dir[2048];
+    char *last_slash = strrchr(checkpoint_path, '/');
+    if (last_slash) {
+        size_t dir_len = last_slash - checkpoint_path;
+        strncpy(model_dir, checkpoint_path, dir_len);
+        model_dir[dir_len] = '\0';
+    } else {
+        strcpy(model_dir, ".");
+    }
+
     // read config
     Transformer transformer;
-    load_config(&transformer);
+    load_config(&transformer, model_dir);
 
     // build the Transformer via the GGUF file
-    build_transformer(&transformer, checkpoint_path);  
+    build_transformer(&transformer, checkpoint_path);
 
-    // build the Tokenizer 
+    // build the Tokenizer
     Tokenizer tokenizer;
-    build_tokenizer(&tokenizer); 
+    build_tokenizer(&tokenizer, model_dir); 
 
     // multi-turn buffer
     TokenBuffer tb;
