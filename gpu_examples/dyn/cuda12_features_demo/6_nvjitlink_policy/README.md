@@ -2,15 +2,17 @@
 
 ## Overview
 
-Modern rewrite of the dyn_link demo using CUDA 12's nvJitLink API. This demonstrates clean runtime policy injection by linking user kernels with policy code at runtime.
+Modern rewrite of the dyn_link demo using CUDA 12's nvJitLink API with **device function pointers**. This demonstrates clean runtime policy injection by linking user kernels with policy code at runtime. **Works with any kernel and any number of arguments!**
 
 ## What This Demo Shows
 
-1. **Clean API** - Modern nvJitLink vs old cuLinkCreate
-2. **PTX-based linking** - No CUBIN complexity
-3. **Runtime policy injection** - Link user code + policy on-the-fly
-4. **Object-oriented framework** - Easy-to-use PolicyFramework class
-5. **Better optimization** - Cross-module optimization possible
+1. **Device Function Pointers** - Pass policy functions from host to kernel
+2. **Clean API** - Modern nvJitLink vs old cuLinkCreate
+3. **PTX-based linking** - No CUBIN complexity
+4. **Runtime policy injection** - Link user code + policy on-the-fly
+5. **Generic Pattern** - Works with ANY kernel with ANY arguments
+6. **Object-oriented framework** - Easy-to-use PolicyFramework class
+7. **Better optimization** - Cross-module optimization possible
 
 ## Comparison with Old dyn_link
 

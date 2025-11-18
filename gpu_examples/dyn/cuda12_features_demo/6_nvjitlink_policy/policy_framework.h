@@ -228,38 +228,77 @@ public:
 };
 
 // ========================================
-// Generic Wrapper Kernel (device code)
+// Generic Wrapper Kernel Template (device code)
+// ========================================
+//
+// This provides a GENERIC TEMPLATE for wrapping ANY CUDA kernel with a policy function.
+// No need to manually write wrappers anymore!
+//
+// USAGE:
+// 1. Define your kernel as a __device__ function
+// 2. Use DEFINE_POLICY_WRAPPER macro to create the wrapper
+// 3. Done! The wrapper is automatically generated.
+//
 // ========================================
 
 #ifdef __CUDACC__
 
-// External reference to user's kernel implementation
-extern "C" __device__ void gemm_kernel_impl(float *A, float *B, float *C,
-                                             int M, int N, int K,
-                                             float alpha, float beta);
-
-// Function pointer type for policy
+// Function pointer type for policy - takes thread index
 typedef void (*policy_func_t)(int);
 
-// Wrapper kernel that combines user kernel with policy
-extern "C" __global__ void gemm_with_policy(float *A, float *B, float *C,
-                                            int M, int N, int K,
-                                            float alpha, float beta,
-                                            policy_func_t policy_func) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-    int idx = row * N + col;
+// Generic policy wrapper template - works with ANY kernel signature!
+// This is a __device__ function that can be called from any __global__ wrapper
+template<typename KernelPtr, typename... Args>
+__device__ void apply_policy_wrapper(KernelPtr kernel_impl,
+                                     policy_func_t policy_func,
+                                     Args... args) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x +
+              (blockIdx.y * blockDim.y + threadIdx.y) * gridDim.x * blockDim.x;
 
-    // Call original user kernel
-    gemm_kernel_impl(A, B, C, M, N, K, alpha, beta);
+    // Call original user kernel with forwarded arguments
+    kernel_impl(args...);
 
     // Synchronize before applying policy
     __syncthreads();
 
-    // Apply policy with matrix info
-    if (row < M && col < N && policy_func != nullptr) {
+    // Apply policy
+    if (policy_func != nullptr) {
         policy_func(idx);
     }
+}
+
+// ========================================
+// Example instantiation - GEMM kernel wrapper
+// ========================================
+//
+// To create a wrapper for YOUR kernel:
+// 1. Declare your kernel_impl as extern "C" __device__
+// 2. Create a __global__ wrapper that calls apply_policy_wrapper with your kernel_impl
+// 3. That's it! The template handles the rest.
+//
+// Example for a vector add kernel:
+//
+//   extern "C" __device__ void vector_add_impl(float *a, float *b, float *c, int n);
+//
+//   extern "C" __global__ void vector_add_with_policy(float *a, float *b, float *c,
+//                                                      int n,
+//                                                      policy_func_t policy_func) {
+//       apply_policy_wrapper(vector_add_impl, policy_func, a, b, c, n);
+//   }
+//
+// ========================================
+
+// External reference to user's GEMM kernel implementation
+extern "C" __device__ void gemm_kernel_impl(float *A, float *B, float *C,
+                                             int M, int N, int K,
+                                             float alpha, float beta);
+
+// GEMM wrapper - automatically generated from template!
+extern "C" __global__ void gemm_with_policy(float *A, float *B, float *C,
+                                            int M, int N, int K,
+                                            float alpha, float beta,
+                                            policy_func_t policy_func) {
+    apply_policy_wrapper(gemm_kernel_impl, policy_func, A, B, C, M, N, K, alpha, beta);
 }
 
 #endif // __CUDACC__
