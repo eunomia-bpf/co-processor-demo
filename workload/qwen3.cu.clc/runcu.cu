@@ -312,6 +312,16 @@ int divUp(int a, int b)
 const int num_threads_lrg = 1024;
 const int num_threads_med = 256;
 
+#ifdef USE_POLICY_FRAMEWORK
+// Include policy framework header for nvJitLink + CLC scheduler
+#include "policy_framework.h"
+
+// Forward declare global policy framework (actual instance created by macro in main)
+// This allows us to reference it from matmul() before main() runs
+extern PolicyFramework* g_policy_framework_ptr;
+PolicyFramework* g_policy_framework_ptr = nullptr;
+#endif
+
 //========== RMS =====
 __global__ void rmsnorm_kernel(float *o, float *x, float *weight, int size, int elementsPerThread)
 {
@@ -504,7 +514,14 @@ void matmul(float *xout, float *x, float *w, int n, int d)
 }
 #else
 
-__global__ void matmul_kernel(float *xout, float *x, float *w, int n, int d) {
+#ifdef USE_POLICY_FRAMEWORK
+// User kernel as device function - will be extracted from binary using cuobjdump
+extern "C" __device__ void matmul_kernel_impl(float *xout, float *x, float *w, int n, int d)
+#else
+// Original: Standard CUDA global kernel
+__global__ void matmul_kernel(float *xout, float *x, float *w, int n, int d)
+#endif
+{
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.x;
     
@@ -548,7 +565,16 @@ void matmul(float *xout, float *x, float *w, int n, int d) {
     int block_size = 256;
     int grid_size = (d + block_size - 1) / block_size;
     int shared_mem = block_size * sizeof(float);
+
+#ifdef USE_POLICY_FRAMEWORK
+    // Use global policy framework (initialized at program start)
+    dim3 gridDim(grid_size);
+    dim3 blockDim(block_size);
+    g_policy_framework_ptr->launch_with_shared("matmul_kernel", gridDim, blockDim, shared_mem, 0, xout, x, w, n, d);
+#else
+    // Original: Direct kernel launch
     matmul_kernel<<<grid_size, block_size, shared_mem>>>(xout, x, w, n, d);
+#endif
 }
 #endif
 
@@ -1475,6 +1501,14 @@ int main(int argc, char *argv[]) {
     #ifdef USE_CUBLAS
     // cuBlas handle
     create_cublas_handle();
+    #endif
+
+    #ifdef USE_POLICY_FRAMEWORK
+    // Initialize policy framework at program start (one-time setup)
+    printf("\n=== Setting up Policy Framework ===\n");
+    POLICY_FRAMEWORK_SETUP_FULL_AUTO(framework);
+    g_policy_framework_ptr = &framework;  // Store pointer for matmul() to use
+    printf("=== Policy Framework Ready ===\n\n");
     #endif
 
     if (!single_prompt) {

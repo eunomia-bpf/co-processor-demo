@@ -18,13 +18,13 @@ extern "C" __device__ void Policy_init(void* state_ptr) {
     s->executions_done = 0;
 }
 
-extern "C" __device__ bool Policy_should_try_steal(void* state_ptr, int current_block) {
+extern "C" __device__ bool Policy_should_try(void* state_ptr, int current_block) {
     MaxStealsPolicy_State* s = (MaxStealsPolicy_State*)state_ptr;
-    bool can_steal = s->executions_done < MaxStealsPolicy_State::max_executions;
-    if (can_steal) {
+    bool can_execute = s->executions_done < MaxStealsPolicy_State::max_executions;
+    if (can_execute) {
         s->executions_done++;
     }
-    return can_steal;
+    return can_execute;
 }
 
 // Function pointer types
@@ -33,4 +33,4 @@ typedef bool (*policy_decision_func_t)(void*, int);
 
 // Policy function pointers
 extern "C" __device__ policy_init_func_t d_Policy_init = Policy_init;
-extern "C" __device__ policy_decision_func_t d_Policy_should_try_steal = Policy_should_try_steal;
+extern "C" __device__ policy_decision_func_t d_Policy_should_try = Policy_should_try;

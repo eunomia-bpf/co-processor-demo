@@ -6,5 +6,6 @@
 *.fatbin
 runcu
 runcublas
+runcu_policy
 *.gguf
 Qwen3-0.6B-GGUF-FP32/

@@ -21,7 +21,7 @@ def load_results(csv_file):
     return df
 
 def plot_performance_comparison(df, output_dir):
-    """Plot GFLOPS performance comparison across patterns and policies"""
+    """Plot throughput performance comparison across patterns and policies"""
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
     # Get unique sizes
@@ -55,15 +55,15 @@ def plot_performance_comparison(df, output_dir):
         pivot_std = df_plot.pivot(index='pattern', columns='config', values='gflops_std')
 
         pivot_data.plot(kind='bar', ax=ax, yerr=pivot_std, capsize=4, width=0.8)
-        ax.set_title(f'GFLOPS Performance - {size}', fontsize=14, fontweight='bold')
+        ax.set_title(f'Throughput - {size}', fontsize=14, fontweight='bold')
         ax.set_xlabel('Matrix Pattern', fontsize=12)
-        ax.set_ylabel('GFLOPS', fontsize=12)
+        ax.set_ylabel('Throughput (GFLOPS)', fontsize=12)
         ax.legend(title='Configuration', bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(axis='y', alpha=0.3)
         ax.tick_params(axis='x', rotation=45)
 
     plt.tight_layout()
-    output_file = os.path.join(output_dir, 'performance_comparison.png')
+    output_file = os.path.join(output_dir, 'throughput_comparison.png')
     plt.savefig(output_file, dpi=300, bbox_inches='tight')
     print(f"✓ Saved: {output_file}")
     plt.close()
@@ -118,7 +118,7 @@ def plot_speedup_analysis(df, output_dir):
     plt.close()
 
 def plot_latency_comparison(df, output_dir):
-    """Plot execution time (latency) comparison"""
+    """Plot latency (execution time) comparison"""
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
 
     sizes = df['size'].unique()
@@ -148,9 +148,9 @@ def plot_latency_comparison(df, output_dir):
         pivot_std = df_time.pivot(index='pattern', columns='config', values='time_std')
 
         pivot_time.plot(kind='bar', ax=ax, yerr=pivot_std, capsize=4, width=0.8)
-        ax.set_title(f'Execution Time - {size}', fontsize=14, fontweight='bold')
+        ax.set_title(f'Latency - {size}', fontsize=14, fontweight='bold')
         ax.set_xlabel('Matrix Pattern', fontsize=12)
-        ax.set_ylabel('Time (ms)', fontsize=12)
+        ax.set_ylabel('Latency (ms)', fontsize=12)
         ax.legend(title='Configuration', bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(axis='y', alpha=0.3)
         ax.tick_params(axis='x', rotation=45)
@@ -211,7 +211,7 @@ def plot_size_scaling(df, output_dir):
 
         ax.set_title(f'Pattern: {pattern}', fontsize=12, fontweight='bold')
         ax.set_xlabel('Matrix Size', fontsize=10)
-        ax.set_ylabel('GFLOPS', fontsize=10)
+        ax.set_ylabel('Throughput (GFLOPS)', fontsize=10)
         ax.set_xticks(range(len(df['size'].unique())))
         ax.set_xticklabels(df['size'].unique(), rotation=45, ha='right')
         ax.legend(fontsize=8)
@@ -237,7 +237,7 @@ def print_summary_table(df):
         print(f"\n{'=' * 100}")
         print(f"Matrix Size: {size}")
         print(f"{'=' * 100}")
-        print(f"{'Pattern':<15} {'Config':<12} {'Policy':<12} {'Time (ms)':<15} {'GFLOPS':<15} {'Speedup':<10}")
+        print(f"{'Pattern':<15} {'Config':<12} {'Policy':<12} {'Latency (ms)':<15} {'Throughput':<15} {'Speedup':<10}")
         print("-" * 100)
 
         df_size = df[df['size'] == size]
@@ -326,9 +326,9 @@ def generate_html_report(df, output_dir):
         Comparison of GEMM performance with different matrix patterns and scheduling policies
     </p>
 
-    <h2>Performance Comparison (GFLOPS)</h2>
+    <h2>Throughput Comparison</h2>
     <div class="plot">
-        <img src="performance_comparison.png" alt="Performance Comparison">
+        <img src="throughput_comparison.png" alt="Throughput Comparison">
     </div>
 
     <h2>Speedup Analysis</h2>
@@ -336,12 +336,12 @@ def generate_html_report(df, output_dir):
         <img src="speedup_analysis.png" alt="Speedup Analysis">
     </div>
 
-    <h2>Latency Comparison (Execution Time)</h2>
+    <h2>Latency Comparison</h2>
     <div class="plot">
         <img src="latency_comparison.png" alt="Latency Comparison">
     </div>
 
-    <h2>Performance Scaling Across Matrix Sizes</h2>
+    <h2>Throughput Scaling Across Matrix Sizes</h2>
     <div class="plot">
         <img src="size_scaling.png" alt="Size Scaling">
     </div>
@@ -359,8 +359,8 @@ def generate_html_report(df, output_dir):
             <th>Pattern</th>
             <th>Config</th>
             <th>Policy</th>
-            <th>Time (ms)</th>
-            <th>GFLOPS</th>
+            <th>Latency (ms)</th>
+            <th>Throughput (GFLOPS)</th>
             <th>Speedup</th>
             <th>Verified</th>
         </tr>

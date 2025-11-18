@@ -16,8 +16,8 @@ extern "C" __device__ void Policy_init(void* state_ptr) {
     // No state to initialize
 }
 
-extern "C" __device__ bool Policy_should_try_steal(void* state_ptr, int current_block) {
-    return true;  // Always try to steal - greedy policy
+extern "C" __device__ bool Policy_should_try(void* state_ptr, int current_block) {
+    return true;  // Always execute
 }
 
 // Function pointer types
@@ -26,4 +26,4 @@ typedef bool (*policy_decision_func_t)(void*, int);
 
 // Policy function pointers
 extern "C" __device__ policy_init_func_t d_Policy_init = Policy_init;
-extern "C" __device__ policy_decision_func_t d_Policy_should_try_steal = Policy_should_try_steal;
+extern "C" __device__ policy_decision_func_t d_Policy_should_try = Policy_should_try;

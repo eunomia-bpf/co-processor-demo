@@ -7,15 +7,42 @@ NVCC := "$(CUDA_INSTALL_PATH)/bin/nvcc"
 INCLUDES := -I"$(CUDA_INSTALL_PATH)/include"
 LIB_PATH ?= $(CUDA_INSTALL_PATH)/lib64
 
+CUDA_ARCH = sm_120
+NVCC_FLAGS = -std=c++17 -arch=$(CUDA_ARCH) $(INCLUDES) -L $(LIB_PATH)
+PTX_FLAGS = $(NVCC_FLAGS) --relocatable-device-code=true
+
 # compile the Cuda version (with dynamic libcudart for eBPF uprobe profiling)
 # Use -Xcompiler to pass frame pointer flag to host compiler for eBPF stack unwinding
 .PHONY: runcu
 runcu: runcu.cu
 	$(NVCC) $(INCLUDES) -O2 -Xcompiler -fno-omit-frame-pointer -Wno-deprecated-gpu-targets -o runcu runcu.cu -L $(LIB_PATH) -lcudart -lm
+
 # compile cublas included
 .PHONY: runcublas
 runcublas: runcu.cu
 	$(NVCC) $(INCLUDES) -O3 -Wno-deprecated-gpu-targets -DUSE_CUBLAS -o runcublas runcu.cu -L $(LIB_PATH) -lcudart -lm -lcublas
+
+# Policy framework version - CLC scheduler version with policy framework
+# Compile with --keep-device-functions to preserve device functions in PTX
+# Define USE_POLICY_FRAMEWORK to enable nvJitLink + CLC scheduler
+.PHONY: runcu_policy
+runcu_policy: runcu.cu policy_framework.h
+	$(NVCC) $(NVCC_FLAGS) -O2 -Xcompiler -fno-omit-frame-pointer -DUSE_POLICY_FRAMEWORK --keep-device-functions runcu.cu -o runcu_policy -lcudart -lm -lcuda -lnvJitLink
+
+# Wrapper kernel PTX (implements CLC scheduler with work-stealing for matmul)
+wrapper_kernel.ptx: wrapper_kernel.cu
+	$(NVCC) $(PTX_FLAGS) -ptx wrapper_kernel.cu -o wrapper_kernel.ptx
+
+# Policy PTX files - different scheduling policies
+policy_greedy.ptx: policy_greedy.cu
+	$(NVCC) $(PTX_FLAGS) -ptx policy_greedy.cu -o policy_greedy.ptx
+
+policy_maxsteals.ptx: policy_maxsteals.cu
+	$(NVCC) $(PTX_FLAGS) -ptx policy_maxsteals.cu -o policy_maxsteals.ptx
+
+# Build all policy components
+.PHONY: policy-all
+policy-all: runcu_policy wrapper_kernel.ptx policy_greedy.ptx policy_maxsteals.ptx
 
 # download the model
 .PHONY: download-model
@@ -64,6 +91,96 @@ runomp: run.c
 	$(CC) -O3 -fopenmp -march=native run.c  -lm  -o run
 
 
+# Run original version (no policy framework)
+.PHONY: run-original
+run-original: runcu
+	@echo "=== Running Original Version (Direct Kernel Launch) ==="
+	./runcu Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0
+
+# Convenience targets for running with different policies
+.PHONY: run-greedy
+run-greedy: policy-all
+	@echo "=== Running with GreedyPolicy ==="
+	WRAPPER_KERNEL_PATH=./wrapper_kernel.ptx POLICY_PTX_PATH=./policy_greedy.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0
+
+.PHONY: run-maxsteals
+run-maxsteals: policy-all
+	@echo "=== Running with MaxStealsPolicy ==="
+	WRAPPER_KERNEL_PATH=./wrapper_kernel.ptx POLICY_PTX_PATH=./policy_maxsteals.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0
+
+.PHONY: run-all
+run-all: runcu policy-all
+	@echo ""
+	@echo "========================================="
+	@echo "Comparison: Original vs Policy Framework"
+	@echo "========================================="
+	@echo ""
+	@$(MAKE) run-original
+	@echo ""
+	@echo "========================================="
+	@echo ""
+	@$(MAKE) run-greedy
+	@echo ""
+	@echo "========================================="
+	@echo ""
+	@$(MAKE) run-maxsteals
+	@echo ""
+	@echo "========================================="
+	@echo "Comparison Complete"
+	@echo "========================================="
+
+.PHONY: help-policy
+help-policy:
+	@echo "========================================="
+	@echo "Qwen3 CUDA Inference with CLC Framework"
+	@echo "========================================="
+	@echo ""
+	@echo "BUILD TARGETS:"
+	@echo "  make policy-all    - Build policy framework version + PTX files"
+	@echo "  make runcu         - Build original version (no policy)"
+	@echo "  make clean         - Clean all build artifacts"
+	@echo "  make clean-all     - Clean build artifacts + PTX files"
+	@echo ""
+	@echo "RUN TARGETS:"
+	@echo "  make run-greedy    - Run with GreedyPolicy (default)"
+	@echo "  make run-original  - Run original version (no policy)"
+	@echo "  make run-maxsteals - Run with MaxStealsPolicy"
+	@echo "  make run-all       - Compare original vs all policies"
+	@echo ""
+	@echo "========================================="
+	@echo "AVAILABLE POLICIES:"
+	@echo "========================================="
+	@echo ""
+	@echo "1. GreedyPolicy (policy_greedy.ptx)"
+	@echo "   - Always executes (baseline CLC behavior)"
+	@echo "   - No throttling or limiting"
+	@echo "   - Best for uniform workloads"
+	@echo ""
+	@echo "2. MaxStealsPolicy (policy_maxsteals.ptx)"
+	@echo "   - Stops after 8 executions per block"
+	@echo "   - Useful for load balancing"
+	@echo "   - Prevents excessive work stealing"
+	@echo ""
+	@echo "========================================="
+	@echo "MANUAL USAGE:"
+	@echo "========================================="
+	@echo ""
+	@echo "Run with GreedyPolicy:"
+	@echo "  WRAPPER_KERNEL_PATH=./wrapper_kernel.ptx \\"
+	@echo "  POLICY_PTX_PATH=./policy_greedy.ptx \\"
+	@echo "  ./runcu_policy Qwen3-0.6B-FP32.gguf -q \"What is CUDA?\""
+	@echo ""
+	@echo "Run with MaxStealsPolicy:"
+	@echo "  WRAPPER_KERNEL_PATH=./wrapper_kernel.ptx \\"
+	@echo "  POLICY_PTX_PATH=./policy_maxsteals.ptx \\"
+	@echo "  ./runcu_policy Qwen3-0.6B-FP32.gguf -q \"What is CUDA?\""
+	@echo ""
+	@echo "========================================="
+
 .PHONY: clean
 clean:
-	rm -f run runcu runcublas
+	rm -f run runcu runcublas runcu_policy
+
+.PHONY: clean-all
+clean-all: clean
+	rm -f *.ptx *.cubin *.o
