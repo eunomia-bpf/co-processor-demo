@@ -1,7 +1,8 @@
 NVCC = nvcc
-CUDA_ARCH = sm_80
+CUDA_ARCH = sm_120
 
 NVCC_FLAGS = -std=c++17 -arch=$(CUDA_ARCH)
+PTX_FLAGS = $(NVCC_FLAGS) --relocatable-device-code=true
 
 all: nvjitlink_demo ptx
 
@@ -13,10 +14,10 @@ nvjitlink_demo: nvjitlink_demo.cu
 ptx: user_kernel.ptx policy.ptx
 
 user_kernel.ptx: user_kernel.cu
-	$(NVCC) $(NVCC_FLAGS) -ptx $< -o $@
+	$(NVCC) $(PTX_FLAGS) -ptx $< -o $@
 
 policy.ptx: policy.cu
-	$(NVCC) $(NVCC_FLAGS) -ptx $< -o $@
+	$(NVCC) $(PTX_FLAGS) -ptx $< -o $@
 
 # Alternative: Generate LTO-IR for even better optimization
 ltoir: user_kernel.ltoir policy.ltoir

@@ -140,13 +140,13 @@ int main(int argc, char** argv) {
 
     const char* options[] = {
         archOpt,
-        "-lto",  // Enable Link-Time Optimization!
+        // "-lto",  // Enable Link-Time Optimization! (disabled for sm_120 compatibility)
         "-O3"    // Optimize
     };
 
-    CHECK_NVJITLINK(nvJitLinkCreate(&handle, 3, options));
+    CHECK_NVJITLINK(nvJitLinkCreate(&handle, 2, options));
     std::cout << "✓ Created nvJitLink handle with options:" << std::endl;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 2; i++) {
         std::cout << "    " << options[i] << std::endl;
     }
 

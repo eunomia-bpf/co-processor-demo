@@ -1,5 +1,5 @@
 NVCC = nvcc
-CUDA_ARCH = sm_80
+CUDA_ARCH = sm_120
 
 NVCC_FLAGS = -std=c++17 -arch=$(CUDA_ARCH)
 
