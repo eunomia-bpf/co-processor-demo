@@ -8,6 +8,7 @@
 #include <math.h>
 #include <string.h>
 #include <fcntl.h>
+#include <libgen.h>
 #if defined _WIN32
     #include "win.h"
 #else
@@ -17,6 +18,29 @@
 // ----------------------------------------------------------------------------
 // Globals
 int GS = 0; // group size global for quantization of the weights
+
+// Get absolute path - works cross-platform
+void get_absolute_path(const char* relative_path, char* absolute_path, size_t size) {
+#if defined _WIN32
+    _fullpath(absolute_path, relative_path, size);
+#else
+    if (relative_path[0] == '/') {
+        // Already absolute
+        strncpy(absolute_path, relative_path, size - 1);
+        absolute_path[size - 1] = '\0';
+    } else {
+        // Make it absolute by prepending current working directory
+        char cwd[2048];
+        if (getcwd(cwd, sizeof(cwd)) != NULL) {
+            snprintf(absolute_path, size, "%s/%s", cwd, relative_path);
+        } else {
+            // Fallback: just copy the relative path
+            strncpy(absolute_path, relative_path, size - 1);
+            absolute_path[size - 1] = '\0';
+        }
+    }
+#endif
+}
 
 // ----------------------------------------------------------------------------
 // Transformer model
@@ -1060,14 +1084,21 @@ int main(int argc, char *argv[]) {
     if (topp < 0.0 || 1.0 < topp) topp = 0.9;
     if (steps < 0) steps = 0;
 
+    // Resolve checkpoint and tokenizer paths to absolute paths so they can be found
+    // regardless of current working directory
+    char resolved_checkpoint_path[4096];
+    char resolved_tokenizer_path[4096];
+    get_absolute_path(checkpoint_path, resolved_checkpoint_path, sizeof(resolved_checkpoint_path));
+    get_absolute_path(tokenizer_path, resolved_tokenizer_path, sizeof(resolved_tokenizer_path));
+
     // build the Transformer via the model .bin file
     Transformer transformer;
-    build_transformer(&transformer, checkpoint_path);
+    build_transformer(&transformer, resolved_checkpoint_path);
     if (steps == 0 || steps > transformer.config.seq_len) steps = transformer.config.seq_len; // override to ~max length
 
     // build the Tokenizer via the tokenizer .bin file
     Tokenizer tokenizer;
-    build_tokenizer(&tokenizer, tokenizer_path, transformer.config.vocab_size);
+    build_tokenizer(&tokenizer, resolved_tokenizer_path, transformer.config.vocab_size);
 
     // build the Sampler
     Sampler sampler;

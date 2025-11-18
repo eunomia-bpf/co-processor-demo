@@ -1,0 +1,55 @@
+# Large model files - do not commit to git
+*.bin
+*.bin.tokenizer
+*.bin.template
+*.bin.template.*
+
+# Build artifacts
+runq
+runq.exe
+*.o
+*.obj
+*.a
+*.so
+*.dll
+*.dylib
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Model downloads and cache
+models/
+.cache/
+*.safetensors
+
+# Debugging
+*.log
+*.dSYM/
+core
+vgcore.*
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+*.code-workspace
+
+# Testing outputs
+test_output/
+*.test
+
+# HuggingFace cache
+~/.cache/huggingface/

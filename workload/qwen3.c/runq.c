@@ -7,6 +7,7 @@
 #include <math.h>
 #include <string.h>
 #include <fcntl.h>
+#include <libgen.h>
 #if defined _WIN32
     #include "win.h"
 #else
@@ -20,6 +21,29 @@ int GS = 0; // group size global for quantization of the weights
 
 // Maximum input prompt buffer size
 #define PROMPT_BUFFER_SIZE 32768
+
+// Get absolute path - works cross-platform
+void get_absolute_path(const char* relative_path, char* absolute_path, size_t size) {
+#if defined _WIN32
+    _fullpath(absolute_path, relative_path, size);
+#else
+    if (relative_path[0] == '/') {
+        // Already absolute
+        strncpy(absolute_path, relative_path, size - 1);
+        absolute_path[size - 1] = '\0';
+    } else {
+        // Make it absolute by prepending current working directory
+        char cwd[2048];
+        if (getcwd(cwd, sizeof(cwd)) != NULL) {
+            snprintf(absolute_path, size, "%s/%s", cwd, relative_path);
+        } else {
+            // Fallback: just copy the relative path
+            strncpy(absolute_path, relative_path, size - 1);
+            absolute_path[size - 1] = '\0';
+        }
+    }
+#endif
+}
 
 // ----------------------------------------------------------------------------
 // Transformer model
@@ -491,7 +515,12 @@ void load_prompt_template(char *checkpoint_path, char *out_template, int with_sy
 
     memset(out_template, 0, 1024);
     FILE *file = fopen(prompt_path, "rb");
-    if (!file) { fprintf(stderr, "Couldn't load prompt template %s\n", prompt_path); exit(EXIT_FAILURE); }
+    if (!file) {
+        fprintf(stderr, "Error: Couldn't load prompt template %s\n", prompt_path);
+        fprintf(stderr, "Make sure the template files are in the same directory as the model.\n");
+        fprintf(stderr, "Run: python export.py %s <model_name> to generate them.\n", checkpoint_path);
+        exit(EXIT_FAILURE);
+    }
     fread(out_template, 1024, 1, file);
     fclose(file);
 }
@@ -509,7 +538,12 @@ void build_tokenizer(Tokenizer *t, char *checkpoint_path, int vocab_size, int en
 
     // read in the file
     FILE *file = fopen(tokenizer_path, "rb");
-    if (!file) { fprintf(stderr, "Couldn't load tokenizer model %s\n", tokenizer_path); exit(EXIT_FAILURE); }
+    if (!file) {
+        fprintf(stderr, "Error: Couldn't load tokenizer model %s\n", tokenizer_path);
+        fprintf(stderr, "Make sure the .tokenizer file is in the same directory as the model.\n");
+        fprintf(stderr, "Run: python export.py %s <model_name> to generate it.\n", checkpoint_path);
+        exit(EXIT_FAILURE);
+    }
     fread(&t->max_token_length, sizeof(int), 1, file);
     fread(&t->bos_token_id, sizeof(int), 1, file);
     fread(&t->eos_token_id, sizeof(int), 1, file);
@@ -974,13 +1008,18 @@ int main(int argc, char *argv[]) {
     if (temperature < 0) temperature = 0;
     if (topp < 0 || 1.0 < topp) topp = 0.9;
 
+    // Resolve checkpoint path to absolute path so tokenizer/template files can be found
+    // regardless of current working directory
+    char resolved_checkpoint_path[4096];
+    get_absolute_path(checkpoint_path, resolved_checkpoint_path, sizeof(resolved_checkpoint_path));
+
     // build the Transformer via the model .bin file
     Transformer transformer;
-    build_transformer(&transformer, checkpoint_path, ctx_length);
+    build_transformer(&transformer, resolved_checkpoint_path, ctx_length);
 
     // build the Tokenizer via the tokenizer .bin file
     Tokenizer tokenizer;
-    build_tokenizer(&tokenizer, checkpoint_path, transformer.config.vocab_size, enable_thinking);
+    build_tokenizer(&tokenizer, resolved_checkpoint_path, transformer.config.vocab_size, enable_thinking);
 
     // build the Sampler
     Sampler sampler;
