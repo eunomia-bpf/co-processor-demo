@@ -6,7 +6,6 @@
 #include "policy_framework.h"
 
 // CHANGE: Kernel is now a device function instead of __global__
-// The framework will wrap it automatically
 extern "C" __device__ void gemm_kernel_impl(float *A, float *B, float *C,
                                              int M, int N, int K,
                                              float alpha, float beta) {
@@ -22,6 +21,12 @@ extern "C" __device__ void gemm_kernel_impl(float *A, float *B, float *C,
         C[row * N + col] = alpha * sum + beta * C[row * N + col];
     }
 }
+
+// ADD: Generate the policy wrapper (one line!)
+GENERATE_POLICY_WRAPPER_WITH_PARAMS(gemm_kernel,
+    (float *A, float *B, float *C, int M, int N, int K, float alpha, float beta),
+    (A, B, C, M, N, K, alpha, beta)
+)
 
 void check_cuda_error(cudaError_t err, const char* msg) {
     if (err != cudaSuccess) {
@@ -42,11 +47,6 @@ int main(int argc, char **argv) {
     printf("GEMM Test: C(%dx%d) = alpha * A(%dx%d) * B(%dx%d) + beta * C\n",
            M, N, M, K, K, N);
     printf("alpha = %.1f, beta = %.1f\n\n", alpha, beta);
-
-    // ADD: Get device properties (using macro from framework header)
-    GET_DEVICE_PROPS(prop, device);
-    printf("Device: %s\n", prop.name);
-    printf("Compute Capability: %d.%d\n\n", prop.major, prop.minor);
 
     // Allocate host memory
     size_t size_A = M * K * sizeof(float);
@@ -94,15 +94,16 @@ int main(int argc, char **argv) {
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
 
-    // ADD: Setup policy framework (single macro replaces all boilerplate!)
+    // ADD: Setup policy framework with FULL AUTO extraction from binary!
+    // No separate PTX file needed - extracts from binary at runtime
     printf("\n=== Setting up Policy Framework ===\n");
-    POLICY_FRAMEWORK_SETUP(framework, "user_kernel.ptx", "policy.ptx", prop.major, prop.minor);
+    POLICY_FRAMEWORK_SETUP_FULL_AUTO(framework, "policy.ptx");
 
-    // CHANGE: Use framework.launch() instead of <<<...>>>
+    // CHANGE: Use framework.launch() with kernel name - supports multiple kernels!
     // Original: gemm_kernel<<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, alpha, beta);
     printf("\n=== Launching Kernel with Policy ===\n");
     cudaEventRecord(start);
-    framework.launch(gridDim, blockDim, 0, d_A, d_B, d_C, M, N, K, alpha, beta);
+    framework.launch("gemm_kernel", gridDim, blockDim, 0, d_A, d_B, d_C, M, N, K, alpha, beta);
     cudaEventRecord(stop);
 
     check_cuda_error(cudaGetLastError(), "kernel launch");

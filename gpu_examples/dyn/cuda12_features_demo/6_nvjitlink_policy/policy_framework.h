@@ -8,9 +8,13 @@
 #include <nvJitLink.h>
 #include <vector>
 #include <string>
+#include <map>
 #include <fstream>
 #include <iostream>
 #include <cstdio>
+#include <cstdlib>
+#include <unistd.h>
+#include <fcntl.h>
 
 // Error checking macros
 #define CHECK_CU(call) do { \
@@ -41,7 +45,7 @@ private:
     std::vector<char> policyPTX;
     std::vector<char> linkedCubin;
     CUmodule module;
-    CUfunction kernelFunc;
+    std::map<std::string, CUfunction> kernelFuncs;  // Support multiple kernels
     bool linked;
     void* h_policy_func_ptr;  // Host-side copy of device function pointer
 
@@ -64,8 +68,56 @@ private:
         return buffer;
     }
 
+    // Extract PTX from current binary using nvcc/cuobjdump
+    std::vector<char> extractPTXFromBinary(const char* kernel_name) {
+        // Get current executable path
+        char exe_path[1024];
+        ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+        if (len == -1) {
+            fprintf(stderr, "Failed to get executable path\n");
+            return {};
+        }
+        exe_path[len] = '\0';
+
+        // Create temporary file for PTX output
+        char ptx_temp[] = "/tmp/kernel_XXXXXX.ptx";
+        int fd = mkstemps(ptx_temp, 4);
+        if (fd == -1) {
+            fprintf(stderr, "Failed to create temp file\n");
+            return {};
+        }
+        close(fd);
+
+        // Use cuobjdump to extract PTX, filtering out headers
+        // PTX code starts with "//" or "." directives after the header info
+        char cmd[2048];
+        snprintf(cmd, sizeof(cmd),
+                 "cuobjdump --dump-ptx '%s' 2>/dev/null | awk 'BEGIN{p=0} /^\\/\\/|^\\.version/{p=1} p{print}' > '%s'",
+                 exe_path, ptx_temp);
+
+        int ret = system(cmd);
+        if (ret != 0) {
+            fprintf(stderr, "Failed to extract PTX from binary (cuobjdump returned %d)\n", ret);
+            unlink(ptx_temp);
+            return {};
+        }
+
+        // Read the extracted PTX
+        std::vector<char> ptx = readFile(ptx_temp);
+
+        // Clean up temp file
+        unlink(ptx_temp);
+
+        if (ptx.empty()) {
+            fprintf(stderr, "Extracted PTX is empty\n");
+            return {};
+        }
+
+        return ptx;
+    }
+
 public:
-    PolicyFramework() : module(nullptr), kernelFunc(nullptr), linked(false), h_policy_func_ptr(nullptr) {
+    PolicyFramework() : module(nullptr), linked(false), h_policy_func_ptr(nullptr) {
         CHECK_CU(cuInit(0));
     }
 
@@ -86,6 +138,21 @@ public:
             userPTX.push_back('\0');
         }
         std::cout << "✓ Loaded user kernel PTX (" << userPTX.size() << " bytes)" << std::endl;
+        return true;
+    }
+
+    // Auto-load user kernel from current binary
+    bool loadUserKernelAuto() {
+        std::cout << "Auto-extracting user kernel from binary..." << std::endl;
+        userPTX = extractPTXFromBinary(nullptr);
+        if (userPTX.empty()) {
+            return false;
+        }
+        // Ensure null terminator for PTX
+        if (userPTX.back() != '\0') {
+            userPTX.push_back('\0');
+        }
+        std::cout << "✓ Auto-extracted user kernel PTX (" << userPTX.size() << " bytes)" << std::endl;
         return true;
     }
 
@@ -183,10 +250,6 @@ public:
         CHECK_CU(cuModuleLoadData(&module, linkedCubin.data()));
         std::cout << "✓ Loaded linked module" << std::endl;
 
-        // Get the wrapped kernel function
-        CHECK_CU(cuModuleGetFunction(&kernelFunc, module, "gemm_with_policy"));
-        std::cout << "✓ Got wrapped kernel function" << std::endl;
-
         // Get the device policy function pointer and copy to host
         CUdeviceptr d_policy_func_ptr_addr;
         size_t size;
@@ -203,12 +266,48 @@ public:
         return true;
     }
 
+    // Get kernel function by name (lazy loading)
+    CUfunction getKernel(const char* kernel_name) {
+        std::string kname(kernel_name);
+
+        // Check if already loaded
+        auto it = kernelFuncs.find(kname);
+        if (it != kernelFuncs.end()) {
+            return it->second;
+        }
+
+        // Load the kernel function
+        char wrapped_kernel_name[256];
+        snprintf(wrapped_kernel_name, sizeof(wrapped_kernel_name), "%s_with_policy", kernel_name);
+
+        CUfunction func;
+        CUresult res = cuModuleGetFunction(&func, module, wrapped_kernel_name);
+        if (res != CUDA_SUCCESS) {
+            const char* errName = nullptr;
+            cuGetErrorName(res, &errName);
+            fprintf(stderr, "Failed to get kernel '%s': %s\n", wrapped_kernel_name, errName ? errName : "unknown");
+            return nullptr;
+        }
+
+        std::cout << "✓ Got wrapped kernel function: " << wrapped_kernel_name << std::endl;
+        kernelFuncs[kname] = func;
+        return func;
+    }
+
     // Generic launch method - works with ANY kernel signature!
     // Uses variadic templates to accept any number/type of parameters
+    // Now accepts kernel name as first parameter for multi-kernel support
     template<typename... Args>
-    bool launch(dim3 gridDim, dim3 blockDim, cudaStream_t stream, Args... args) {
+    bool launch(const char* kernel_name, dim3 gridDim, dim3 blockDim, cudaStream_t stream, Args... args) {
         if (!linked) {
             fprintf(stderr, "Framework not linked! Call link() first.\n");
+            return false;
+        }
+
+        // Get the kernel function for this specific kernel
+        CUfunction kernelFunc = getKernel(kernel_name);
+        if (!kernelFunc) {
+            fprintf(stderr, "Failed to get kernel: %s\n", kernel_name);
             return false;
         }
 
@@ -224,12 +323,6 @@ public:
         return true;
     }
 
-    // Legacy launch method for GEMM (for backward compatibility)
-    bool launch_gemm(dim3 gridDim, dim3 blockDim, cudaStream_t stream,
-                float *d_A, float *d_B, float *d_C,
-                int M, int N, int K, float alpha, float beta) {
-        return launch(gridDim, blockDim, stream, d_A, d_B, d_C, M, N, K, alpha, beta);
-    }
 
     void getModule(CUmodule* mod) {
         *mod = module;
@@ -267,6 +360,29 @@ public:
     cudaGetDeviceProperties(&prop_##fw, device_##fw); \
     POLICY_FRAMEWORK_SETUP(fw, kernel_ptx, policy_ptx, prop_##fw.major, prop_##fw.minor)
 
+// MACRO: Setup policy framework with PTX auto-extraction from binary
+// Usage: POLICY_FRAMEWORK_SETUP_FULL_AUTO(framework_var, policy_ptx)
+// Note: Kernel name is now specified at launch() time, not setup time
+#define POLICY_FRAMEWORK_SETUP_FULL_AUTO(fw, policy_ptx) \
+    PolicyFramework fw; \
+    do { \
+        int device_##fw = 0; \
+        cudaDeviceProp prop_##fw; \
+        cudaGetDeviceProperties(&prop_##fw, device_##fw); \
+        if (!fw.loadUserKernelAuto()) { \
+            fprintf(stderr, "Failed to auto-extract user kernel from binary\n"); \
+            exit(EXIT_FAILURE); \
+        } \
+        if (!fw.loadPolicy(policy_ptx)) { \
+            fprintf(stderr, "Failed to load policy: %s\n", policy_ptx); \
+            exit(EXIT_FAILURE); \
+        } \
+        if (!fw.link(prop_##fw.major, prop_##fw.minor)) { \
+            fprintf(stderr, "Failed to link framework\n"); \
+            exit(EXIT_FAILURE); \
+        } \
+    } while(0)
+
 // MACRO: Get device properties (needed for manual setup)
 #define GET_DEVICE_PROPS(prop_var, device_var) \
     int device_var = 0; \
@@ -277,22 +393,27 @@ public:
 // USAGE EXAMPLES:
 // ========================================
 //
-// Example 1: Automatic setup (easiest)
-// ------------------------------------
+// Example 1: FULL AUTO - Extract PTX from binary (EASIEST!)
+// ----------------------------------------------------------
+//   POLICY_FRAMEWORK_SETUP_FULL_AUTO(fw, "policy.ptx");
+//   fw.launch(grid, block, 0, args...);
+//
+//   Benefits:
+//   - NO separate PTX file needed for kernel
+//   - NO extra compilation step
+//   - Extracts PTX from binary at runtime using cuobjdump
+//
+// Example 2: Auto setup with external PTX
+// ----------------------------------------
 //   POLICY_FRAMEWORK_SETUP_AUTO(framework, "kernel.ptx", "policy.ptx");
 //   framework.launch(grid, block, 0, args...);
 //
-// Example 2: Manual setup (more control)
-// --------------------------------------
+// Example 3: Manual setup (most control)
+// ---------------------------------------
 //   GET_DEVICE_PROPS(prop, device);
 //   printf("Device: %s\n", prop.name);
 //   POLICY_FRAMEWORK_SETUP(framework, "kernel.ptx", "policy.ptx", prop.major, prop.minor);
 //   framework.launch(grid, block, 0, args...);
-//
-// Example 3: Inline setup and launch (most compact)
-// -------------------------------------------------
-//   POLICY_FRAMEWORK_SETUP_AUTO(fw, "kernel.ptx", "policy.ptx");
-//   fw.launch(grid, block, 0, a, b, c, n);
 //
 
 // ========================================
@@ -373,59 +494,73 @@ __device__ void apply_policy_wrapper(KernelPtr kernel_impl,
     __device__ void kernel_name##_impl(__VA_ARGS__)
 
 // ========================================
+// MACRO TO GENERATE POLICY WRAPPER
+// ========================================
+//
+// Use this macro in your .cu file to generate the policy wrapper for your kernel.
+// Place it AFTER your kernel implementation.
+//
+// Syntax: GENERATE_POLICY_WRAPPER(kernel_name, param_types...)
+//
+// Example:
+//   // 1. Define your kernel as __device__
+//   extern "C" __device__ void gemm_kernel_impl(float *A, float *B, float *C, int M, int N, int K, float alpha, float beta) {
+//       // your kernel code
+//   }
+//
+//   // 2. Generate the policy wrapper (one line!)
+//   GENERATE_POLICY_WRAPPER(gemm_kernel, float*, float*, float*, int, int, int, float, float)
+//
+// This creates:
+//   - gemm_kernel_with_policy (the global kernel that PolicyFramework calls)
+//
+#define GENERATE_POLICY_WRAPPER(kernel_name, ...) \
+    extern "C" __global__ void kernel_name##_with_policy(__VA_ARGS__, policy_func_t policy_func) { \
+        apply_policy_wrapper(kernel_name##_impl, policy_func); \
+    }
+
+// Alternative: Generate wrapper with explicit parameter list
+// This version allows you to specify parameter names for clarity
+//
+// Syntax: GENERATE_POLICY_WRAPPER_WITH_PARAMS(kernel_name, (param_declarations), (param_names))
+//
+// Example:
+//   GENERATE_POLICY_WRAPPER_WITH_PARAMS(gemm_kernel,
+//       (float *A, float *B, float *C, int M, int N, int K, float alpha, float beta),
+//       (A, B, C, M, N, K, alpha, beta)
+//   )
+//
+#define REMOVE_PARENS(...) __VA_ARGS__
+#define GENERATE_POLICY_WRAPPER_WITH_PARAMS(kernel_name, params, args) \
+    extern "C" __global__ void kernel_name##_with_policy(REMOVE_PARENS params, policy_func_t policy_func) { \
+        apply_policy_wrapper(kernel_name##_impl, policy_func, REMOVE_PARENS args); \
+    }
+
+// ========================================
 // Example Usage with Different Kernels
 // ========================================
 //
 // EXAMPLE 1: GEMM Kernel
 // ----------------------
-// Original code:
-//   __global__ void gemm_kernel(float *A, float *B, float *C, int M, int N, int K, float alpha, float beta) {
+//   extern "C" __device__ void gemm_kernel_impl(float *A, float *B, float *C, int M, int N, int K, float alpha, float beta) {
 //       // kernel body
 //   }
-//
-// With policy support (ONE line change):
-//   POLICY_KERNEL_DECL(gemm_kernel, float *A, float *B, float *C, int M, int N, int K, float alpha, float beta) {
-//       // kernel body - UNCHANGED!
-//   }
+//   GENERATE_POLICY_WRAPPER_WITH_PARAMS(gemm_kernel, (float *A, float *B, float *C, int M, int N, int K, float alpha, float beta))
 //
 // EXAMPLE 2: Vector Add Kernel
 // -----------------------------
-// Original code:
-//   __global__ void vec_add(float *a, float *b, float *c, int n) {
+//   extern "C" __device__ void vec_add_impl(float *a, float *b, float *c, int n) {
 //       // kernel body
 //   }
-//
-// With policy support (ONE line change):
-//   POLICY_KERNEL_DECL(vec_add, float *a, float *b, float *c, int n) {
-//       // kernel body - UNCHANGED!
-//   }
+//   GENERATE_POLICY_WRAPPER_WITH_PARAMS(vec_add, (float *a, float *b, float *c, int n))
 //
 // EXAMPLE 3: Matrix Transpose Kernel
 // -----------------------------------
-// Original code:
-//   __global__ void transpose(float *in, float *out, int width, int height) {
+//   extern "C" __device__ void transpose_impl(float *in, float *out, int width, int height) {
 //       // kernel body
 //   }
-//
-// With policy support (ONE line change):
-//   POLICY_KERNEL_DECL(transpose, float *in, float *out, int width, int height) {
-//       // kernel body - UNCHANGED!
-//   }
+//   GENERATE_POLICY_WRAPPER_WITH_PARAMS(transpose, (float *in, float *out, int width, int height))
 //
 // ========================================
-
-// External reference to user's GEMM kernel implementation
-// (This is auto-generated by the POLICY_KERNEL_DECL macro in gemm_test.cu)
-extern "C" __device__ void gemm_kernel_impl(float *A, float *B, float *C,
-                                             int M, int N, int K,
-                                             float alpha, float beta);
-
-// GEMM wrapper - automatically generated from template!
-extern "C" __global__ void gemm_with_policy(float *A, float *B, float *C,
-                                            int M, int N, int K,
-                                            float alpha, float beta,
-                                            policy_func_t policy_func) {
-    apply_policy_wrapper(gemm_kernel_impl, policy_func, A, B, C, M, N, K, alpha, beta);
-}
 
 #endif // __CUDACC__
