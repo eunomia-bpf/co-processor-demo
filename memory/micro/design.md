@@ -644,6 +644,326 @@ kernel,mode,size_factor,median_ms,prefetch_overhead_ms,speedup
 
 ---
 
+### 2.6 RQ4 (扩展): UVM Prefetch + Fault Batching Heuristics Under Oversubscription
+
+**目标**：在 oversub 场景下，调整 driver 的 prefetch 和 fault batching heuristics，能否在不同访问模式上带来可观改善？与用户层 `cudaMemPrefetchAsync` 相比，谁更有效、更稳定？
+
+**实验设计**：
+
+A. Driver-level prefetch & fault batching 配置：
+
+不做全 3×3 穷举，选 4 个代表性组合：
+
+```
+C1 = P0 + B2 (prefetch 关，batch 默认)
+  - uvm_perf_prefetch_enable=0
+  - uvm_perf_fault_batch_count=256
+
+C2 = P1 + B2 (driver 默认)
+  - uvm_perf_prefetch_enable=1
+  - uvm_perf_prefetch_threshold=51
+  - uvm_perf_prefetch_min_faults=1
+  - uvm_perf_fault_batch_count=256
+
+C3 = P2 + B3 (aggressive prefetch + large batch)
+  - uvm_perf_prefetch_enable=1
+  - uvm_perf_prefetch_threshold=20
+  - uvm_perf_prefetch_min_faults=1
+  - uvm_perf_fault_batch_count=512
+
+C4 = P1 + B1 (保守 prefetch + small batch，偏向低 latency)
+  - uvm_perf_prefetch_enable=1
+  - uvm_perf_prefetch_threshold=51
+  - uvm_perf_prefetch_min_faults=1
+  - uvm_perf_fault_batch_count=128
+```
+
+B. User-level `cudaMemPrefetchAsync`：
+
+- 在 launch 前，对主要数组 `cudaMemPrefetchAsync(ptr, size, dev)`
+- 对 oversub 版本的两种策略：
+  - Sliding window prefetch（分片预取）
+  - Hotspot prefetch（只预取热点数据，如 KV cache / feature hotset）
+
+C. Size factor 范围：
+
+重点关心 oversub 的"转折点"：
+```python
+SIZE_FACTORS = [0.5, 1.0, 1.25]  # 主要点
+# 对 Transformer/GNN 可加 1.5x, 2.0x
+```
+
+**Tier-0 实验**：
+
+```python
+KERNELS = ['seq_stream', 'rand_stream', 'pointer_chase']
+MODE = 'uvm'
+SIZE_FACTORS = [0.5, 1.0, 1.25]
+CONFIGS = ['C1', 'C2', 'C3', 'C4']
+STRIDE_BYTES = 4096
+ITERATIONS = 3-5
+
+# 额外：mode=uvm_prefetch 在 C2 下跑，对比用户态 vs 内核态 prefetch
+```
+
+**Tier-1/2 实验**：
+
+对每个 kernel（GEMM/stencil/SpMV/Conv/Transformer/GNN）：
+```python
+SIZE_FACTORS = [0.5, 1.25]  # 两点
+CONFIGS = ['C1', 'C2', 'C3']  # 三种配置
+ITERATIONS = 5
+```
+
+**输出指标**：
+
+```csv
+kernel,mode,size_factor,config,median_ms,bw_GBps,page_fault_count,prefetch_fault_count,migrated_bytes
+```
+
+从 `/proc/driver/nvidia-uvm/stats` 采样：
+- `page_fault_count`
+- `prefetch_fault_count` / migrated bytes
+- fault service time（如果暴露）
+
+**可视化**：
+
+图 RQ4-A: T0 per-kernel throughput vs size_factor
+- X 轴: size_factor (0.5/1.0/1.25)
+- Y 轴: normalized throughput
+- 曲线: C1–C4 + `uvm_prefetch`
+- 布局: 3 个子图（seq/rand/pointer）
+
+图 RQ4-B: Tier-1/2 bar chart – per real kernel best/worst config
+- X 轴: kernel（GEMM, stencil, SpMV, Conv, Transformer, GNN）
+- Y 轴: slowdown vs device@0.5×
+- 每个 kernel 三根 bar: C1、C2、C3（在 1.25× 下）
+
+图 RQ4-C: (可选) Fault stats 对比
+- 堆叠柱状图: fault rate / migrated bytes
+- 证明 prefetch 早了/晚了导致的 fault 链形态改变
+
+**输出文件**：
+- `rq4_extended_results.csv`
+- `rq4_heuristics_sweep.{pdf,png}`
+
+---
+
+### 2.7 RQ5: UVM Thrashing Detection + Pin Strategy Effectiveness
+
+**目标**：对 pointer-chase / CPU+GPU 共同访问的数据结构，UVM 内建的 thrash detector + pin heuristics 在多大程度上能缓解"来回迁移"的灾难？调得激进时会不会伤及正常 kernel？
+
+**实验设计**：
+
+A. Thrashing 相关参数配置：
+
+给 3–4 个代表性 policy：
+
+```
+T0 – Thrashing OFF
+  - uvm_perf_thrashing_enable=0
+
+T1 – Driver Default
+  - 保持默认值 (threshold=3, pin=300ms, lapse=500us)
+
+T2 – Conservative detection, light pinning
+  - uvm_perf_thrashing_threshold=5
+  - uvm_perf_thrashing_pin_threshold=10
+  - uvm_perf_thrashing_pin=300
+  - uvm_perf_thrashing_lapse_usec=1000
+
+T3 – Aggressive detection + long pin
+  - uvm_perf_thrashing_threshold=3
+  - uvm_perf_thrashing_pin_threshold=3
+  - uvm_perf_thrashing_pin=1000
+  - uvm_perf_thrashing_lapse_usec=1000
+```
+
+**Tier-0 实验**：
+
+1. `pointer_chase` (GPU-only)：
+
+```python
+SIZE_FACTORS = [0.5, 1.0, 1.25]
+POLICIES = ['T0', 'T1', 'T2', 'T3']
+# 看 oversub 时从 10µs → 秒级的退化能否被 T2/T3 拉回来
+```
+
+2. CPU+GPU shared synthetic：
+
+设计一个 managed array W：
+```python
+size_factor = [1.0, 1.25]
+loop K 次，每轮：
+  - GPU kernel 顺序/随机扫 W 一遍
+  - CPU 在 host 上对 W 的前一半做 random walk
+记录每轮 GPU/CPU 端的时间
+```
+
+在 T0/T1/T2/T3 下跑，对比：
+- GPU runtime 是否因为 thrashing policy 改善
+- CPU 端是否被 pin 策略饿死（latency 变长）
+
+**Tier-1/2 实验**：
+
+SpMV/BFS/GNN：选 "CPU 部分参与" 的版本
+- CPU 做 advance/compaction、GPU 做 neighbor gather
+- 或在每次 GPU kernel 间隔插一个 CPU 访问 pass
+
+```python
+SIZE_FACTORS = [1.25]  # oversub 点
+POLICIES = ['T0', 'T1', 'T3']
+```
+
+**输出指标**：
+
+```csv
+kernel,policy,size_factor,median_ms,thrashing_events,pinned_pages,pin_duration_avg,migration_count
+```
+
+从 UVM stats 获取：
+- #thrashing events
+- #pinned pages
+- pin duration 平均值
+- eviction/migration 次数
+
+**可视化**：
+
+图 RQ5-1: pointer-chase latency vs size_factor vs policy
+- X 轴: size_factor
+- Y 轴: runtime (log scale)
+- 曲线: T0/T1/T2/T3
+- 看 1.25× 点是否对 T3 有明显改善
+
+图 RQ5-2: CPU+GPU synthetic heatmap
+- X 轴: policy（T0–T3）
+- Y 轴: iteration index
+- 颜色: GPU 时间或合计时间
+- 一眼看出哪种策略最稳定而不 thrash
+
+图 RQ5-3: real kernels bar chart
+- X 轴: kernel（SpMV/BFS/GNN）
+- Y 轴: throughput (normalized to device-only)
+- Bar: T0/T1/T3 在 1.25× 下
+
+**输出文件**：
+- `rq5_results.csv`
+- `rq5_thrashing_policies.{pdf,png}`
+
+---
+
+### 2.8 RQ6: Access Counter Migration + Page Table Placement Impact
+
+**目标**：在 H100 上，access-counter-based migrations + GPU-resident page tables 在大规模 oversubscription 下能否真正改善性能？还是只是二阶优化，跟 10×–100× 退化相比只是噪声？
+
+**实验设计**：
+
+A. Access counter 和 page table 参数配置：
+
+定义几组策略：
+
+```
+A0 – Access counter OFF + page table in sys
+  - uvm_perf_access_counter_migration_enable=0
+  - uvm_page_table_location=sys
+
+A1 – Default
+  - migration_enable=-1 (auto)
+  - uvm_perf_access_counter_threshold=256
+  - uvm_page_table_location=auto
+
+A2 – Aggressive migration, sys page table
+  - uvm_perf_access_counter_migration_enable=1
+  - uvm_perf_access_counter_threshold=64
+  - uvm_page_table_location=sys
+
+A3 – Aggressive + page table in VRAM
+  - uvm_perf_access_counter_migration_enable=1
+  - uvm_perf_access_counter_threshold=64
+  - uvm_page_table_location=vid
+```
+
+**Tier-0 实验**：
+
+`rand_stream` / `pointer_chase`：
+```python
+SIZE_FACTORS = [0.75, 1.0, 1.25, 1.5]
+CONFIGS = ['A0', 'A2', 'A3']
+STRIDE_BYTES = 4096
+ITERATIONS = 3-5
+```
+
+`seq_stream` 作为控制组：
+```python
+SIZE_FACTORS = [0.75, 1.25]  # 两点
+CONFIGS = ['A0', 'A3']
+# 看 dense sequential 场景下是否几乎无差
+```
+
+**Tier-1/2 实验**：
+
+SpMV/BFS：
+```python
+SIZE_FACTORS = [1.0, 1.25]  # oversub 转折点
+CONFIGS = ['A0', 'A2', 'A3']
+```
+
+Transformer/GNN：
+```python
+# KV cache 1.5×、feature matrix 1.5× (明显 oversub)
+SIZE_FACTORS = [1.5]
+CONFIGS = ['A0', 'A2', 'A3']
+```
+
+注意：page table 放 `vid` 会消耗少量显存，size_factor 估算时预留 margin（如 0.95× 当 1.0×）
+
+**输出指标**：
+
+```csv
+kernel,config,size_factor,median_ms,bw_GBps,access_counter_migrations,migrated_bytes,pcie_traffic,tlb_misses
+```
+
+从 UVM stats 获取：
+- `access_counter_migrations` 数量
+- migrated bytes
+
+从 Nsight Systems / nvprof 获取：
+- PCIe traffic
+- TLB miss / page table walk（如果能拿到）
+
+**可视化**：
+
+图 RQ6-1: T0 rand/pointer throughput vs size_factor
+- X 轴: size_factor
+- Y 轴: normalized throughput
+- 曲线: A0 / A2 / A3
+- 重点看 1.25× / 1.5× 时是否 A2/A3 明显优于 A0
+
+图 RQ6-2: real kernels per-kernel bar chart
+- X 轴: kernel（SpMV, BFS, Transformer, GNN）
+- Y 轴: throughput normalized to device fit-in baseline
+- 三根 bar: A0/A2/A3（在某个 oversub 点 1.25× or 1.5×）
+
+图 RQ6-3: (可选) access-counter effectiveness scatter
+- X 轴: #migrations (A2/A3)
+- Y 轴: throughput improvement vs A0
+- 如果点云贴近 x 轴，说明 access-counter migration 作用有限
+
+**输出文件**：
+- `rq6_results.csv`
+- `rq6_access_counter_placement.{pdf,png}`
+
+**预期结论**：
+
+如果最后发现：
+- 不管 rand_stream 还是 SpMV/BFS/Transformer/GNN，A2/A3 相对 A0 的改进只有 ±10–20%
+- 而 oversub 本身带来的 regression 是 10×–100×
+- page table 在 `vid` vs `sys` 差别 <10%
+
+则可给出尖锐结论：**现有 access-counter / page-table placement 这些高级机制只是在原本就很糟糕的 oversub 行为上做小修小补，无法从根本上改变性能形状**。这为后续机制（page-subdividing、device-driven migration、multi-GPU 协调）提供了强动机。
+
+---
+
 ## 三、实验矩阵：real kernel 为主，synthetic 为辅
 
 ### 3.1 维度 1：内存模式（还是那四个）
