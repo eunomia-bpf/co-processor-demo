@@ -837,6 +837,12 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
     int token = prompt_tokens[0]; // kick off with the first token in the prompt
     int pos = 0;     // position in the sequence
 
+    // timing variables
+    struct timespec start_time, first_token_time, end_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+    int first_token_generated = 0;
+    int generated_tokens = 0;
+
     while (pos < transformer->config.seq_len) {
         // forward the transformer to get logits for the next token
         float *logits = forward(transformer, token, pos);
@@ -848,6 +854,13 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
         } else {
             // otherwise sample the next token from the logits
             next = sample(sampler, logits);
+
+            // record first token time
+            if (!first_token_generated) {
+                clock_gettime(CLOCK_MONOTONIC, &first_token_time);
+                first_token_generated = 1;
+            }
+            generated_tokens++;
         }
         pos++;
 
@@ -860,7 +873,22 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
         if (pos >= num_prompt_tokens && (next == tokenizer->bos_token_id || next == tokenizer->eos_token_id))
             break;
     }
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
     printf("\n");
+
+    // calculate and print metrics
+    if (first_token_generated) {
+        double ttft = (first_token_time.tv_sec - start_time.tv_sec) +
+                      (first_token_time.tv_nsec - start_time.tv_nsec) / 1e9;
+        double total_time = (end_time.tv_sec - first_token_time.tv_sec) +
+                           (end_time.tv_nsec - first_token_time.tv_nsec) / 1e9;
+        double tokens_per_sec = total_time > 0 ? generated_tokens / total_time : 0;
+
+        fprintf(stderr, "\nTTFT: %.3f s\n", ttft);
+        fprintf(stderr, "Generated tokens: %d\n", generated_tokens);
+        fprintf(stderr, "Tokens per second: %.2f tok/s\n", tokens_per_sec);
+    }
+
     free(prompt_tokens);
 }
 
@@ -890,6 +918,12 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char
     int token;       // stores the current token to feed into the transformer
     int pos = 0;     // position in the sequence
 
+    // timing variables
+    struct timespec start_time, first_token_time, end_time;
+    int first_token_generated = 0;
+    int generated_tokens = 0;
+    int track_metrics = 0;
+
     while (1) {
         // if context window is exceeded, clear it
         if (pos >= transformer->config.seq_len) {
@@ -900,6 +934,25 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char
 
         // when it is the user's turn to contribute tokens to the dialog...
         if (user_turn) {
+            // print metrics from previous turn
+            if (track_metrics && first_token_generated) {
+                clock_gettime(CLOCK_MONOTONIC, &end_time);
+                double ttft = (first_token_time.tv_sec - start_time.tv_sec) +
+                              (first_token_time.tv_nsec - start_time.tv_nsec) / 1e9;
+                double total_time = (end_time.tv_sec - first_token_time.tv_sec) +
+                                   (end_time.tv_nsec - first_token_time.tv_nsec) / 1e9;
+                double tokens_per_sec = total_time > 0 ? generated_tokens / total_time : 0;
+
+                fprintf(stderr, "\nTTFT: %.3f s\n", ttft);
+                fprintf(stderr, "Generated tokens: %d\n", generated_tokens);
+                fprintf(stderr, "Tokens per second: %.2f tok/s\n", tokens_per_sec);
+            }
+
+            // reset metrics for new turn
+            first_token_generated = 0;
+            generated_tokens = 0;
+            track_metrics = 0;
+
             // get the user prompt
             if (cli_user_prompt != NULL) {
                 // user prompt for position 0 was passed in, use it
@@ -924,6 +977,8 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char
             encode(tokenizer, rendered_prompt, prompt_tokens, &num_prompt_tokens);
             pos = 0; // reset the user index
             user_turn = 0;
+            clock_gettime(CLOCK_MONOTONIC, &start_time);
+            track_metrics = 1;
         }
 
         // determine the token to pass into the transformer next
@@ -946,6 +1001,13 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, char
                 printf("\n");
                 user_turn = 1;
             } else if (next != tokenizer->bos_token_id && next != tokenizer->eos_token_id) {
+                // record first token time
+                if (!first_token_generated) {
+                    clock_gettime(CLOCK_MONOTONIC, &first_token_time);
+                    first_token_generated = 1;
+                }
+                generated_tokens++;
+
                 printf("%s", decode(tokenizer, next));
                 fflush(stdout);
             }
@@ -979,7 +1041,7 @@ int main(int argc, char *argv[]) {
     float topp = 0.9f;          // top-p in nucleus sampling. 1.0 = off. 0.9 works well, but slower
     char *prompt = NULL;        // prompt string
     unsigned long long rng_seed = 0; // seed rng with time by default
-    char *mode = "chat";        // generate|chat
+    char *mode = "generate";        // generate|chat
     char *system_prompt = NULL; // the (optional) system prompt to use in chat mode
     int enable_thinking = 0;    // 1 enables thinking
     int ctx_length = 0;         // context length

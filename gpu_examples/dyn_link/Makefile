@@ -18,8 +18,8 @@ GEMM_TEST_CUBIN = gemm_test_kernel.cubin
 # CUDA architecture
 CUDA_ARCH = sm_120
 
-# Compiler flags for main app (no device linking to avoid CUDA 12.9 link.stub errors)
-NVCCFLAGS = -arch=$(CUDA_ARCH) -O3 -std=c++11 --no-device-link
+# Compiler flags for main app
+NVCCFLAGS = -arch=$(CUDA_ARCH) -O3 -std=c++11
 
 # Default target: build all
 all: $(TARGET) $(WRAPPER_CUBIN) $(GEMM_TEST_CUBIN) policy.cubin
