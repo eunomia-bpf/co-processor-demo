@@ -2,6 +2,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+
+// GEMM kernel: C = alpha * A * B + beta * C
+// A: M x K, B: K x N, C: M x N
+// Device function (not global) for dynamic linking with wrapper
+extern "C"
+__device__ void gemm_kernel(float *A, float *B, float *C,
+                           int M, int N, int K,
+                           float alpha, float beta) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < M && col < N) {
+        float sum = 0.0f;
+        for (int k = 0; k < K; k++) {
+            sum += A[row * K + k] * B[k * N + col];
+        }
+        C[row * N + col] = alpha * sum + beta * C[row * N + col];
+    }
+}
+
 #include "gemm_policy_wrapper.h"
 
 void check_cuda_error(cudaError_t err, const char* msg) {

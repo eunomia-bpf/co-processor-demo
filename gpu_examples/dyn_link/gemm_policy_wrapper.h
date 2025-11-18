@@ -60,7 +60,7 @@ inline void run_with_policy(dim3 gridDim, dim3 blockDim, cudaStream_t stream, fl
     // Read cubin files
     size_t wrapper_size, user_size, policy_size;
     void* wrapper_data = read_file("./wrapper_kernel.cubin", &wrapper_size);
-    void* user_data = read_file("./gemm_kernel.cubin", &user_size);
+    void* user_data = read_file("./gemm_test_kernel.cubin", &user_size);
     void* policy_data = read_file("./policy.cubin", &policy_size);
 
     if (!wrapper_data || !user_data || !policy_data) {
@@ -69,7 +69,7 @@ inline void run_with_policy(dim3 gridDim, dim3 blockDim, cudaStream_t stream, fl
     }
 
     printf("Linking wrapper_kernel.cubin (%zu bytes)\n", wrapper_size);
-    printf("Linking gemm_kernel.cubin (%zu bytes)\n", user_size);
+    printf("Linking gemm_test_kernel.cubin (%zu bytes) - extracted from user code\n", user_size);
     printf("Linking policy.cubin (%zu bytes)\n", policy_size);
 
     // Add cubins to the linker (order matters for resolving symbols)
@@ -78,7 +78,7 @@ inline void run_with_policy(dim3 gridDim, dim3 blockDim, cudaStream_t stream, fl
              "cuLinkAddData(wrapper)");
 
     check_cu(cuLinkAddData(linkState, CU_JIT_INPUT_CUBIN, user_data, user_size,
-                          "gemm_kernel.cubin", 0, nullptr, nullptr),
+                          "gemm_test_kernel.cubin", 0, nullptr, nullptr),
              "cuLinkAddData(user_kernel)");
 
     check_cu(cuLinkAddData(linkState, CU_JIT_INPUT_CUBIN, policy_data, policy_size,
