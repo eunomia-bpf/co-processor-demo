@@ -1,0 +1,15 @@
+# Executables
+sample_app
+extract_and_rewrite
+
+# CUDA artifacts
+*.ptx
+*.cubin
+*.fatbin
+*.o
+
+# Extracted files (from cuobjdump)
+sample_app.*.cubin
+
+# Generated files
+*.out

@@ -1,23 +1,8 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-// GEMM kernel: C = alpha * A * B + beta * C
-// A: M x K, B: K x N, C: M x N
-__global__ void gemm_kernel(float *A, float *B, float *C,
-                           int M, int N, int K,
-                           float alpha, float beta) {
-    int row = blockIdx.y * blockDim.y + threadIdx.y;
-    int col = blockIdx.x * blockDim.x + threadIdx.x;
-
-    if (row < M && col < N) {
-        float sum = 0.0f;
-        for (int k = 0; k < K; k++) {
-            sum += A[row * K + k] * B[k * N + col];
-        }
-        C[row * N + col] = alpha * sum + beta * C[row * N + col];
-    }
-}
+#include <math.h>
+#include "policy_framework.h"
 
 void check_cuda_error(cudaError_t err, const char* msg) {
     if (err != cudaSuccess) {
@@ -27,15 +12,26 @@ void check_cuda_error(cudaError_t err, const char* msg) {
 }
 
 int main(int argc, char **argv) {
-    // Matrix dimensions
-    int M = 512;  // Rows of A and C
-    int N = 512;  // Columns of B and C
-    int K = 512;  // Columns of A, Rows of B
+    printf("========================================\n");
+    printf("CUDA 12 nvJitLink Policy Framework Demo\n");
+    printf("========================================\n\n");
 
+    // Get device info
+    int device;
+    cudaGetDevice(&device);
+    cudaDeviceProp prop;
+    cudaGetDeviceProperties(&prop, device);
+    printf("Device: %s\n", prop.name);
+    printf("Compute Capability: %d.%d\n\n", prop.major, prop.minor);
+
+    // Matrix dimensions
+    int M = 512;
+    int N = 512;
+    int K = 512;
     float alpha = 1.0f;
     float beta = 0.0f;
 
-    printf("GEMM Test: C(%dx%d) = alpha * A(%dx%d) * B(%dx%d) + beta * C\n",
+    printf("GEMM: C(%dx%d) = alpha * A(%dx%d) * B(%dx%d) + beta * C\n",
            M, N, M, K, K, N);
     printf("alpha = %.1f, beta = %.1f\n\n", alpha, beta);
 
@@ -50,6 +46,7 @@ int main(int argc, char **argv) {
     float *h_C_ref = (float*)malloc(size_C);
 
     // Initialize matrices
+    srand(42);
     for (int i = 0; i < M * K; i++) {
         h_A[i] = (float)(rand() % 100) / 100.0f;
     }
@@ -67,43 +64,67 @@ int main(int argc, char **argv) {
     check_cuda_error(cudaMalloc(&d_B, size_B), "cudaMalloc B");
     check_cuda_error(cudaMalloc(&d_C, size_C), "cudaMalloc C");
 
-    // Copy data to device
+    // Copy to device
     check_cuda_error(cudaMemcpy(d_A, h_A, size_A, cudaMemcpyHostToDevice), "cudaMemcpy A");
     check_cuda_error(cudaMemcpy(d_B, h_B, size_B, cudaMemcpyHostToDevice), "cudaMemcpy B");
     check_cuda_error(cudaMemcpy(d_C, h_C, size_C, cudaMemcpyHostToDevice), "cudaMemcpy C");
+
+    // Setup policy framework
+    printf("=== Setting up Policy Framework ===\n");
+    PolicyFramework framework;
+
+    if (!framework.loadUserKernel("user_kernel.ptx")) {
+        fprintf(stderr, "Failed to load user kernel\n");
+        return EXIT_FAILURE;
+    }
+
+    if (!framework.loadPolicy("policy.ptx")) {
+        fprintf(stderr, "Failed to load policy\n");
+        return EXIT_FAILURE;
+    }
+
+    if (!framework.link(prop.major, prop.minor)) {
+        fprintf(stderr, "Failed to link\n");
+        return EXIT_FAILURE;
+    }
 
     // Launch kernel
     dim3 blockDim(16, 16);
     dim3 gridDim((N + blockDim.x - 1) / blockDim.x,
                  (M + blockDim.y - 1) / blockDim.y);
 
-    printf("Launching kernel with grid(%d, %d) and block(%d, %d)\n",
+    printf("\n=== Launching Kernel ===\n");
+    printf("Grid: (%d, %d), Block: (%d, %d)\n",
            gridDim.x, gridDim.y, blockDim.x, blockDim.y);
 
-    // Create events for timing
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-
     cudaEventRecord(start);
-    gemm_kernel<<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, alpha, beta);
-    cudaEventRecord(stop);
 
-    check_cuda_error(cudaGetLastError(), "kernel launch");
+    if (!framework.launch(gridDim, blockDim, 0, d_A, d_B, d_C,
+                         M, N, K, alpha, beta)) {
+        fprintf(stderr, "Failed to launch kernel\n");
+        return EXIT_FAILURE;
+    }
+
+    cudaEventRecord(stop);
     check_cuda_error(cudaDeviceSynchronize(), "kernel execution");
 
     cudaEventSynchronize(stop);
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
 
+    printf("✓ Kernel executed successfully\n");
+
     // Copy result back
     check_cuda_error(cudaMemcpy(h_C, d_C, size_C, cudaMemcpyDeviceToHost), "cudaMemcpy result");
 
-    // Verify result (simple check on a few elements)
-    printf("\nVerifying results (CPU reference)...\n");
+    // Verify
+    printf("\n=== Verification ===\n");
     bool correct = true;
     int errors = 0;
-    const int max_errors = 10;
+    const int max_errors = 5;
 
     for (int i = 0; i < M && errors < max_errors; i++) {
         for (int j = 0; j < N && errors < max_errors; j++) {
@@ -113,11 +134,16 @@ int main(int argc, char **argv) {
             }
             h_C_ref[i * N + j] = alpha * sum + beta * h_C_ref[i * N + j];
 
+            // Apply policy: zero upper triangle
+            if (j > i) {
+                h_C_ref[i * N + j] = 0.0f;
+            }
+
             float diff = fabs(h_C[i * N + j] - h_C_ref[i * N + j]);
             if (diff > 1e-3) {
                 if (errors < max_errors) {
-                    printf("Mismatch at C[%d][%d]: GPU=%.6f, CPU=%.6f, diff=%.6f\n",
-                           i, j, h_C[i * N + j], h_C_ref[i * N + j], diff);
+                    printf("Mismatch at [%d][%d]: GPU=%.6f, CPU=%.6f\n",
+                           i, j, h_C[i * N + j], h_C_ref[i * N + j]);
                     errors++;
                 }
                 correct = false;
@@ -126,16 +152,25 @@ int main(int argc, char **argv) {
     }
 
     if (correct) {
-        printf("✓ Results verified successfully!\n");
+        printf("✓ Results verified! Policy correctly applied.\n");
     } else {
-        printf("✗ Found %d+ errors\n", errors);
+        printf("✗ Verification failed (%d+ errors)\n", errors);
     }
 
-    // Performance metrics
+    // Performance
     double gflops = (2.0 * M * N * K) / (milliseconds * 1e6);
-    printf("\nPerformance:\n");
-    printf("  Time: %.3f ms\n", milliseconds);
-    printf("  GFLOPS: %.2f\n", gflops);
+    printf("\n=== Performance ===\n");
+    printf("Time: %.3f ms\n", milliseconds);
+    printf("GFLOPS: %.2f\n", gflops);
+
+    printf("\n=== Sample Results ===\n");
+    printf("First 5x5 block (lower triangle should be non-zero, upper zero):\n");
+    for (int i = 0; i < 5; i++) {
+        for (int j = 0; j < 5; j++) {
+            printf("%8.4f ", h_C[i * N + j]);
+        }
+        printf("\n");
+    }
 
     // Cleanup
     cudaFree(d_A);
@@ -148,6 +183,9 @@ int main(int argc, char **argv) {
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
 
-    printf("\nGEMM test completed successfully!\n");
+    printf("\n========================================\n");
+    printf("Demo completed successfully!\n");
+    printf("========================================\n");
+
     return 0;
 }

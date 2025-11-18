@@ -1,0 +1,10 @@
+# Executables
+gemm_test
+
+# CUDA artifacts
+*.ptx
+*.cubin
+*.o
+
+# Generated files
+*.out
