@@ -11,3 +11,12 @@ test_matrices
 gemm_test_original
 # Generated files
 *.out
+
+# Benchmark results and visualizations
+benchmark_results.csv
+plots/
+*.png
+
+# Test matrices
+test_matrices/
+*.bin

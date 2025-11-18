@@ -39,6 +39,9 @@ policy.ptx: policy.cu
 clean:
 	rm -f gemm_test gemm_test_modify gemm_test_original wrapper_kernel *.ptx *.cubin *.o
 
+clean-all: clean
+	rm -rf test_matrices benchmark_results.csv plots/
+
 # Run original version (no policy framework)
 run-original: gemm_test_original
 	@echo "=== Running Original Version (Direct Kernel Launch) ==="
@@ -75,6 +78,28 @@ run-all: all
 
 run: run-greedy
 
+# Benchmarking targets
+matrices:
+	@echo "=== Generating Test Matrices ==="
+	python3 generate_matrices.py --sizes 512x512x512 256x256x256 --output-dir ./test_matrices
+
+benchmark: all matrices
+	@echo "=== Running Comprehensive Benchmark ==="
+	python3 benchmark_driver.py --warmup 3 --runs 10
+
+visualize:
+	@echo "=== Generating Visualizations ==="
+	python3 visualize_results.py --input benchmark_results.csv --output-dir ./plots
+	@echo ""
+	@echo "View results at: ./plots/benchmark_report.html"
+
+benchmark-full: benchmark visualize
+	@echo ""
+	@echo "========================================="
+	@echo "Full benchmark and visualization complete!"
+	@echo "View HTML report: ./plots/benchmark_report.html"
+	@echo "========================================="
+
 help:
 	@echo "========================================="
 	@echo "CUDA 12 nvJitLink + CLC Scheduler Framework"
@@ -83,6 +108,7 @@ help:
 	@echo "BUILD TARGETS:"
 	@echo "  make              - Build demo and all policy PTX files"
 	@echo "  make clean        - Clean all build artifacts"
+	@echo "  make clean-all    - Clean build artifacts + matrices + results"
 	@echo "  make help         - Show this help message"
 	@echo ""
 	@echo "RUN TARGETS:"
@@ -91,6 +117,12 @@ help:
 	@echo "  make run-greedy    - Run with GreedyPolicy"
 	@echo "  make run-maxsteals - Run with MaxStealsPolicy"
 	@echo "  make run-all       - Compare original vs all policies"
+	@echo ""
+	@echo "BENCHMARK TARGETS:"
+	@echo "  make matrices      - Generate test matrices with different patterns"
+	@echo "  make benchmark     - Run comprehensive benchmark suite"
+	@echo "  make visualize     - Generate visualizations from results"
+	@echo "  make benchmark-full - Run benchmark + generate visualizations"
 	@echo ""
 	@echo "========================================="
 	@echo "AVAILABLE POLICIES:"
@@ -138,4 +170,4 @@ help:
 	@echo "  scheduler/clc_bench/clc_policy_framework.cuh"
 	@echo "========================================="
 
-.PHONY: all ptx clean run help
+.PHONY: all ptx clean clean-all run help matrices benchmark visualize benchmark-full
