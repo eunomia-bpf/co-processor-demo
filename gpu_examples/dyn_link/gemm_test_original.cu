@@ -1,8 +1,23 @@
 #include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <math.h>
-#include "gemm_policy_wrapper.h"
+
+// GEMM kernel: C = alpha * A * B + beta * C
+// A: M x K, B: K x N, C: M x N
+__global__ void gemm_kernel(float *A, float *B, float *C,
+                           int M, int N, int K,
+                           float alpha, float beta) {
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < M && col < N) {
+        float sum = 0.0f;
+        for (int k = 0; k < K; k++) {
+            sum += A[row * K + k] * B[k * N + col];
+        }
+        C[row * N + col] = alpha * sum + beta * C[row * N + col];
+    }
+}
 
 void check_cuda_error(cudaError_t err, const char* msg) {
     if (err != cudaSuccess) {
@@ -71,16 +86,7 @@ int main(int argc, char **argv) {
     cudaEventCreate(&stop);
 
     cudaEventRecord(start);
-
-    // Launch wrapper kernel - it will call gemm_kernel + apply policy
-    // Use same grid/block as the kernels need
-    run_with_policy(
-        gridDim, blockDim, 0,  // use same grid/block as kernels
-        d_A, d_B, d_C,         // Kernel parameters
-        M, N, K,
-        alpha, beta
-    );
-
+    gemm_kernel<<<gridDim, blockDim>>>(d_A, d_B, d_C, M, N, K, alpha, beta);
     cudaEventRecord(stop);
 
     check_cuda_error(cudaGetLastError(), "kernel launch");
