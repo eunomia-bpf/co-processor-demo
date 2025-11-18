@@ -42,3 +42,4 @@ test_devices
 npu_examples/list_devices
 gpu_examples/llvm_to_opencl/simple_opencl_runner
 gpu_examples/simple_llvm_ir_opencl/opencl_runner
+cuda-samples/

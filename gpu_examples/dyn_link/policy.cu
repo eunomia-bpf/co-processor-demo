@@ -17,3 +17,7 @@ __device__ void policy_upper_triangle_zero(float* C, int M, int N) {
     }
 }
 
+// Export device function pointer as a global variable for cudaLibraryGetManaged
+typedef void (*PolicyFuncType)(float*, int, int);
+extern "C" __device__ PolicyFuncType policy_upper_triangle_zero_ptr = policy_upper_triangle_zero;
+

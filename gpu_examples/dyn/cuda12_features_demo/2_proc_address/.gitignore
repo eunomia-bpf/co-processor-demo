@@ -1,0 +1,5 @@
+# Demo binary
+proc_address_demo
+
+# Intermediate objects
+*.o

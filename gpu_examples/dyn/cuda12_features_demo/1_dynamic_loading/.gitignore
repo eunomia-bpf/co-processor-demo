@@ -1,0 +1,7 @@
+# Demo binary
+dynamic_loading_demo
+
+# Generated device code artifacts
+*.fatbin
+*.cubin
+*.o

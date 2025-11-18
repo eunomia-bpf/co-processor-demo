@@ -1,0 +1,10 @@
+# Demo binary
+nvfatbin_demo
+
+# Generated kernels
+*.ptx
+*.cubin
+*.fatbin
+
+# Objects
+*.o

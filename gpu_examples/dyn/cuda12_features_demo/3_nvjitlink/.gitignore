@@ -1,0 +1,11 @@
+# Demo binary
+nvjitlink_demo
+
+# Linked or intermediate device code
+*.ptx
+*.ltoir
+*.cubin
+*.fatbin
+
+# Objects
+*.o

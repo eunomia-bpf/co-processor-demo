@@ -9,11 +9,9 @@ TARGET = gemm_test
 # Source files
 MAIN_SRC = gemm_test.cu
 POLICY_SRC = policy.cu
-WRAPPER_SRC = wrapper_kernel.cu
 
-# Output cubins
-WRAPPER_CUBIN = wrapper_kernel.cubin
-GEMM_TEST_CUBIN = gemm_test_kernel.cubin
+# Output cubins (no longer need GEMM_TEST_CUBIN or WRAPPER_CUBIN)
+# The kernel is now compiled into the main executable via template
 
 # CUDA architecture
 CUDA_ARCH = sm_120
@@ -22,23 +20,17 @@ CUDA_ARCH = sm_120
 NVCCFLAGS = -arch=$(CUDA_ARCH) -O3 -std=c++11
 
 # Default target: build all
-all: $(TARGET) $(WRAPPER_CUBIN) $(GEMM_TEST_CUBIN) policy.cubin
+all: $(TARGET) policy.cubin
 
-# Build main app with device code included
-$(TARGET): $(MAIN_SRC) gemm_policy_wrapper.h
-	$(NVCC) $(NVCCFLAGS) $(MAIN_SRC) -o $(TARGET) -lcuda
-
-# Extract kernel cubin from gemm_test.cu (contains the user's gemm_kernel)
-$(GEMM_TEST_CUBIN): $(MAIN_SRC)
-	$(NVCC) -arch=$(CUDA_ARCH) -O3 -std=c++11 -rdc=true -cubin -DCOMPILING_CUBIN $(MAIN_SRC) -o $@
-
-# Build wrapper cubin
-wrapper_kernel.cubin: $(WRAPPER_SRC)
-	$(NVCC) -arch=$(CUDA_ARCH) -O3 -std=c++11 -rdc=true -cubin $(WRAPPER_SRC) -o $@
-
-# Build policy cubin
+# Build policy cubin for runtime dynamic loading
 policy.cubin: $(POLICY_SRC)
 	$(NVCC) -arch=$(CUDA_ARCH) -O3 -std=c++11 -rdc=true -cubin $(POLICY_SRC) -o $@
+
+# Build main app with device code using -rdc=true (relocatable device code)
+# This allows the template wrapper kernel to reference undefined external symbols
+# which will be resolved when we load the policy cubin at runtime
+$(TARGET): $(MAIN_SRC) gemm_policy_wrapper.h
+	$(NVCC) $(NVCCFLAGS) -rdc=true $(MAIN_SRC) -o $(TARGET) -lcuda
 
 # Run the test (requires all cubins for runtime linking)
 run: all

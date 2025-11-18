@@ -23,13 +23,6 @@ __device__ void gemm_kernel_impl(float *A, float *B, float *C,
     }
 }
 
-#ifdef COMPILING_CUBIN
-// Device function pointer (exported for wrapper to call)
-// Only define when compiling to cubin to avoid linker errors
-typedef void (*KernelFunc)(float*, float*, float*, int, int, int, float, float);
-extern "C" __device__ KernelFunc gemm_kernel_impl_ptr = gemm_kernel_impl;
-#endif
-
 #include "gemm_policy_wrapper.h"
 
 void check_cuda_error(cudaError_t err, const char* msg) {
@@ -100,13 +93,12 @@ int main(int argc, char **argv) {
 
     cudaEventRecord(start);
 
-    // Launch wrapper kernel with kernel cubin + policy
-    // Works with ANY kernel cubin (user kernels, cuBLAS-extracted, etc.)
-    run_with_policy(
+    // Launch wrapper kernel with template + policy
+    // The template kernel is compiled in this executable
+    // The policy is dynamically loaded at runtime
+    run_with_policy<gemm_kernel_impl>(
         gridDim, blockDim, 0,           // grid/block dimensions
-        "./gemm_test_kernel.cubin",     // kernel cubin (works with ANY kernel!)
-        "gemm_kernel_impl_ptr",         // name of device function pointer variable
-        "./policy.cubin",               // policy to apply
+        "./policy.cubin",               // policy to apply (dynamically loaded)
         d_A, d_B, d_C,                  // kernel parameters
         M, N, K,
         alpha, beta

@@ -1,0 +1,10 @@
+# Demo binary
+context_independent_demo
+
+# Generated fatbins or intermediates
+*.fatbin
+*.cubin
+*.ptx
+
+# Objects
+*.o
