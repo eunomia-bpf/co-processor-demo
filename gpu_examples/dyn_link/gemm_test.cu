@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include <cuda.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -7,9 +8,9 @@
 // A: M x K, B: K x N, C: M x N
 // Device function (not global) for dynamic linking with wrapper
 extern "C"
-__device__ void gemm_kernel(float *A, float *B, float *C,
-                           int M, int N, int K,
-                           float alpha, float beta) {
+__device__ void gemm_kernel_impl(float *A, float *B, float *C,
+                                 int M, int N, int K,
+                                 float alpha, float beta) {
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -21,6 +22,13 @@ __device__ void gemm_kernel(float *A, float *B, float *C,
         C[row * N + col] = alpha * sum + beta * C[row * N + col];
     }
 }
+
+#ifdef COMPILING_CUBIN
+// Device function pointer (exported for wrapper to call)
+// Only define when compiling to cubin to avoid linker errors
+typedef void (*KernelFunc)(float*, float*, float*, int, int, int, float, float);
+extern "C" __device__ KernelFunc gemm_kernel_impl_ptr = gemm_kernel_impl;
+#endif
 
 #include "gemm_policy_wrapper.h"
 
@@ -92,11 +100,14 @@ int main(int argc, char **argv) {
 
     cudaEventRecord(start);
 
-    // Launch wrapper kernel - it will call gemm_kernel + apply policy
-    // Use same grid/block as the kernels need
+    // Launch wrapper kernel with kernel cubin + policy
+    // Works with ANY kernel cubin (user kernels, cuBLAS-extracted, etc.)
     run_with_policy(
-        gridDim, blockDim, 0,  // use same grid/block as kernels
-        d_A, d_B, d_C,         // Kernel parameters
+        gridDim, blockDim, 0,           // grid/block dimensions
+        "./gemm_test_kernel.cubin",     // kernel cubin (works with ANY kernel!)
+        "gemm_kernel_impl_ptr",         // name of device function pointer variable
+        "./policy.cubin",               // policy to apply
+        d_A, d_B, d_C,                  // kernel parameters
         M, N, K,
         alpha, beta
     );
@@ -126,6 +137,11 @@ int main(int argc, char **argv) {
                 sum += h_A[i * K + k] * h_B[k * N + j];
             }
             h_C_ref[i * N + j] = alpha * sum + beta * h_C_ref[i * N + j];
+
+            // Apply policy: zero upper triangle (col > row)
+            if (j > i) {
+                h_C_ref[i * N + j] = 0.0f;
+            }
 
             float diff = fabs(h_C[i * N + j] - h_C_ref[i * N + j]);
             if (diff > 1e-3) {
