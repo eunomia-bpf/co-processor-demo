@@ -13,7 +13,7 @@ gemm_test: gemm_test.cu policy_framework.h
 # Generate PTX files for runtime linking
 ptx: user_kernel.ptx policy.ptx
 
-user_kernel.ptx: user_kernel.cu
+user_kernel.ptx: gemm_test.cu
 	$(NVCC) $(PTX_FLAGS) -ptx $< -o $@
 
 policy.ptx: policy.cu
