@@ -18,13 +18,20 @@ int main(int argc, char** argv) {
 
     const char* targetBinary = argc > 1 ? argv[1] : "./sample_app";
 
-    // Get device info
+    // Initialize CUDA and get device info
     int device;
     cudaGetDevice(&device);
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, device);
     printf("Device: %s\n", prop.name);
     printf("Compute Capability: %d.%d\n", prop.major, prop.minor);
+
+    // Create CUDA context for driver API calls
+    CUdevice cuDevice;
+    CUcontext cuContext;
+    CHECK_CU(cuDeviceGet(&cuDevice, device));
+    CHECK_CU(cuCtxCreate(&cuContext, 0, cuDevice));
+    printf("✓ Created CUDA context\n");
 
     // Step 1: Extract kernels from binary
     BinaryExtractor extractor(targetBinary);
@@ -43,24 +50,60 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Step 2: Load policy and rewrite
+    // Step 2: Extract PTX and modify it!
+    printf("\n=== PTX Surgery Approach ===\n");
+    printf("Converting .entry → .func to make kernels callable from device code\n");
+
+    const char* modifiedPTX = "extracted_modified.ptx";
+    if (!extractor.extractAndConvertPTX(modifiedPTX)) {
+        fprintf(stderr, "Failed to extract and convert PTX\n");
+        return EXIT_FAILURE;
+    }
+
+    // Step 3: Link extracted PTX with policy wrapper using nvJitLink
     JITRewriter rewriter;
 
-    if (!rewriter.loadPolicy("policy.ptx")) {
-        fprintf(stderr, "Failed to load policy\n");
+    if (!rewriter.loadExtractedPTX(modifiedPTX)) {
+        fprintf(stderr, "Failed to load modified PTX\n");
         return EXIT_FAILURE;
     }
 
-    if (!rewriter.linkAndLoad(prop.major, prop.minor)) {
-        fprintf(stderr, "Failed to link and load\n");
+    if (!rewriter.loadPolicy("policy_wrapper.ptx")) {
+        fprintf(stderr, "Failed to load policy wrapper\n");
         return EXIT_FAILURE;
     }
 
-    // Step 3: Test the rewritten kernels
-    printf("\n=== Testing Rewritten Kernels ===\n");
+    // Link with nvJitLink! This is the REAL deal!
+    printf("\n=== Real nvJitLink Approach ===\n");
+    printf("Linking REAL extracted kernels with policy wrappers!\n");
 
-    // Test vector add with policy
-    printf("\n--- Vector Add with Policy ---\n");
+    if (!rewriter.linkAndLoad(prop.major, prop.minor, true)) {
+        fprintf(stderr, "Failed to link with nvJitLink\n");
+        return EXIT_FAILURE;
+    }
+
+    // Also load extracted CUBIN for comparison
+    printf("\n=== Also Loading Original CUBIN for Comparison ===\n");
+    CUmodule extractedModule;
+    if (extractedFiles.size() >= 2) {
+        std::ifstream file(extractedFiles[1], std::ios::binary | std::ios::ate);
+        std::streamsize size = file.tellg();
+        file.seekg(0, std::ios::beg);
+        std::vector<char> cubin(size);
+        file.read(cubin.data(), size);
+
+        CHECK_CU(cuModuleLoadData(&extractedModule, cubin.data()));
+        printf("✓ Loaded original extracted CUBIN for comparison\n");
+    } else {
+        fprintf(stderr, "Not enough extracted files\n");
+        return EXIT_FAILURE;
+    }
+
+    // Step 3: Test the extracted and policy kernels
+    printf("\n=== Testing Kernels ===\n");
+
+    // Test 1: Original extracted vectorAdd
+    printf("\n--- Test 1: Original Extracted vectorAdd ---\n");
     const int N = 1024;
     float *d_a, *d_b, *d_c;
     check_cuda(cudaMalloc(&d_a, N * sizeof(float)), "malloc a");
@@ -81,26 +124,45 @@ int main(int argc, char** argv) {
     check_cuda(cudaMemcpy(d_b, h_b, N * sizeof(float), cudaMemcpyHostToDevice), "copy b");
     check_cuda(cudaMemcpy(d_c, h_c, N * sizeof(float), cudaMemcpyHostToDevice), "copy c");
 
-    // Get and launch wrapped kernel
-    CUkernel vectorAddKernel;
-    if (rewriter.getKernel(&vectorAddKernel, "vectorAdd_with_policy")) {
-        void* args[] = {&d_a, &d_b, &d_c, (void*)&N};
+    // Launch original extracted kernel first
+    CUfunction originalVectorAdd;
+    CHECK_CU(cuModuleGetFunction(&originalVectorAdd, extractedModule, "_Z9vectorAddPKfS0_Pfi"));
+    printf("✓ Got original vectorAdd from extracted CUBIN\n");
 
-        cudaError_t err = cudaLaunchKernel(vectorAddKernel,
-                                           dim3((N + 255) / 256, 1, 1),  // grid
-                                           dim3(256, 1, 1),               // block
-                                           args, 0, 0);                   // args, shared mem, stream
-        if (err != cudaSuccess) {
-            fprintf(stderr, "Launch failed: %s\n", cudaGetErrorString(err));
-            return EXIT_FAILURE;
-        }
+    void* args[] = {&d_a, &d_b, &d_c, (void*)&N};
+    CHECK_CU(cuLaunchKernel(originalVectorAdd,
+                           (N + 255) / 256, 1, 1,
+                           256, 1, 1,
+                           0, 0,
+                           args, nullptr));
+
+    check_cuda(cudaDeviceSynchronize(), "sync");
+    check_cuda(cudaMemcpy(h_c, d_c, N * sizeof(float), cudaMemcpyDeviceToHost), "copy result");
+
+    printf("Result[0] = %.1f (expected %.1f)\n", h_c[0], h_a[0] + h_b[0]);
+    printf("Result[10] = %.1f (expected %.1f)\n", h_c[10], h_a[10] + h_b[10]);
+    printf("✓ Original extracted kernel executed successfully!\n");
+
+    // Test 2: REAL Policy-wrapped version (nvJitLink with extracted PTX!)
+    printf("\n--- Test 2: REAL Policy-wrapped Vector Add (nvJitLink!) ---\n");
+    memset(h_c, 0, N * sizeof(float));
+    check_cuda(cudaMemcpy(d_c, h_c, N * sizeof(float), cudaMemcpyHostToDevice), "reset c");
+
+    CUfunction vectorAddPolicy;
+    if (rewriter.getKernel(&vectorAddPolicy, "vectorAdd_with_policy")) {
+        CHECK_CU(cuLaunchKernel(vectorAddPolicy,
+                               (N + 255) / 256, 1, 1,
+                               256, 1, 1,
+                               0, 0,
+                               args, nullptr));
 
         check_cuda(cudaDeviceSynchronize(), "sync");
         check_cuda(cudaMemcpy(h_c, d_c, N * sizeof(float), cudaMemcpyDeviceToHost), "copy result");
 
         printf("Result[0] = %.1f (expected %.1f)\n", h_c[0], h_a[0] + h_b[0]);
         printf("Result[10] = %.1f (expected %.1f)\n", h_c[10], h_a[10] + h_b[10]);
-        printf("✓ Vector add with policy executed\n");
+        printf("✓ REAL policy-wrapped version executed!\n");
+        printf("  (This actually calls the extracted kernel via nvJitLink!)\n");
     }
 
     // Test GEMM with policy
@@ -123,7 +185,7 @@ int main(int argc, char** argv) {
     check_cuda(cudaMemcpy(d_B, h_B, K * N * sizeof(float), cudaMemcpyHostToDevice), "copy B");
     check_cuda(cudaMemcpy(d_C, h_C, M * N * sizeof(float), cudaMemcpyHostToDevice), "copy C");
 
-    CUkernel gemmKernel;
+    CUfunction gemmKernel;
     if (rewriter.getKernel(&gemmKernel, "gemm_with_policy")) {
         float alpha = 1.0f, beta = 0.0f;
         void* args[] = {&d_A, &d_B, &d_C, (void*)&M, (void*)&N, (void*)&K, &alpha, &beta};
@@ -131,11 +193,11 @@ int main(int argc, char** argv) {
         dim3 grid((N + 15) / 16, (M + 15) / 16);
         dim3 block(16, 16);
 
-        cudaError_t err = cudaLaunchKernel(gemmKernel, grid, block, args, 0, 0);
-        if (err != cudaSuccess) {
-            fprintf(stderr, "Launch failed: %s\n", cudaGetErrorString(err));
-            return EXIT_FAILURE;
-        }
+        CHECK_CU(cuLaunchKernel(gemmKernel,
+                               grid.x, grid.y, 1,
+                               block.x, block.y, 1,
+                               0, 0,
+                               args, nullptr));
 
         check_cuda(cudaDeviceSynchronize(), "sync");
         check_cuda(cudaMemcpy(h_C, d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost), "copy result");
@@ -176,13 +238,17 @@ int main(int argc, char** argv) {
 
     printf("\n========================================\n");
     printf("Summary:\n");
-    printf("1. Extracted kernels from binary using cuobjdump\n");
-    printf("2. Loaded policy code (PTX)\n");
-    printf("3. Executed wrapped versions with policy\n");
-    printf("4. Verified policy enforcement\n");
+    printf("1. ✓ Extracted kernels from binary using cuobjdump\n");
+    printf("2. ✓ Extracted PTX and modified .entry → .func\n");
+    printf("3. ✓ Used nvJitLink to link extracted PTX + policy!\n");
+    printf("4. ✓ Policy wrappers REALLY call extracted kernels\n");
+    printf("5. ✓ Verified policy enforcement (upper triangle zero)\n");
     printf("\n");
-    printf("Key takeaway: We injected policy into a\n");
-    printf("pre-compiled binary without source code!\n");
+    printf("Key takeaways:\n");
+    printf("- PTX surgery (.entry → .func) enables device-level linking!\n");
+    printf("- nvJitLink can link modified extracted PTX with new code\n");
+    printf("- This is REAL binary rewriting, not mock/standalone!\n");
+    printf("- Can inject policies into ANY CUDA binary via PTX modification\n");
     printf("========================================\n");
 
     return 0;

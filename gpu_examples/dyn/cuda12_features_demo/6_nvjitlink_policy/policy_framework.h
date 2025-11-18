@@ -118,11 +118,11 @@ public:
         std::cout << "✓ Created nvJitLink handle" << std::endl;
         std::cout << "  Options: " << options[0] << " " << options[1] << std::endl;
 
-        // Add user kernel PTX
+        // Add user kernel PTX (includes wrapper)
         CHECK_NVJITLINK(nvJitLinkAddData(handle, NVJITLINK_INPUT_PTX,
                                          userPTX.data(), userPTX.size(),
                                          "user_kernel"));
-        std::cout << "✓ Added user kernel PTX" << std::endl;
+        std::cout << "✓ Added user kernel PTX (includes wrapper)" << std::endl;
 
         // Add policy PTX
         CHECK_NVJITLINK(nvJitLinkAddData(handle, NVJITLINK_INPUT_PTX,
@@ -189,3 +189,34 @@ public:
         return true;
     }
 };
+
+// ========================================
+// Generic Wrapper Kernel (device code)
+// ========================================
+// Only compile when generating PTX, not for main executable
+
+#if defined(__CUDACC__) && !defined(HOST_COMPILE)
+
+// External reference to user's kernel implementation
+extern "C" __device__ void gemm_kernel_impl(float *A, float *B, float *C,
+                                             int M, int N, int K,
+                                             float alpha, float beta);
+
+// External reference to policy function
+extern "C" __device__ void apply_policy(float *C, int M, int N);
+
+// Wrapper kernel that combines user kernel with policy
+extern "C" __global__ void gemm_with_policy(float *A, float *B, float *C,
+                                            int M, int N, int K,
+                                            float alpha, float beta) {
+    // Call original user kernel
+    gemm_kernel_impl(A, B, C, M, N, K, alpha, beta);
+
+    // Synchronize before applying policy
+    __syncthreads();
+
+    // Apply policy
+    apply_policy(C, M, N);
+}
+
+#endif // defined(__CUDACC__) && !defined(HOST_COMPILE)

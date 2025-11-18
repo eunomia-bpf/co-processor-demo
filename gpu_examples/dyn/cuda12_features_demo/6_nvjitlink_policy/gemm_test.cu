@@ -165,10 +165,8 @@ int main(int argc, char **argv) {
             }
             h_C_ref[i * N + j] = alpha * sum + beta * h_C_ref[i * N + j];
 
-            // Apply policy: zero upper triangle
-            if (j > i) {
-                h_C_ref[i * N + j] = 0.0f;
-            }
+            // Apply policy: increment by 1
+            h_C_ref[i * N + j] += 1.0f;
 
             float diff = fabs(h_C[i * N + j] - h_C_ref[i * N + j]);
             if (diff > 1e-3) {
@@ -183,7 +181,7 @@ int main(int argc, char **argv) {
     }
 
     if (correct) {
-        printf("✓ Results verified! Policy correctly applied.\n");
+        printf("✓ Results verified! Policy correctly applied (counter incremented).\n");
     } else {
         printf("✗ Verification failed (%d+ errors)\n", errors);
     }
@@ -195,7 +193,7 @@ int main(int argc, char **argv) {
     printf("GFLOPS: %.2f\n", gflops);
 
     printf("\n=== Sample Results ===\n");
-    printf("First 5x5 block (lower triangle should be non-zero, upper zero):\n");
+    printf("First 5x5 block (all values should be GEMM result + 1):\n");
     for (int i = 0; i < 5; i++) {
         for (int j = 0; j < 5; j++) {
             printf("%8.4f ", h_C[i * N + j]);

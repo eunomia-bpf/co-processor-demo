@@ -4,7 +4,7 @@ CUDA_ARCH = sm_120
 NVCC_FLAGS = -std=c++17 -arch=$(CUDA_ARCH)
 PTX_FLAGS = $(NVCC_FLAGS) --relocatable-device-code=true
 
-all: sample_app extract_and_rewrite policy.ptx
+all: sample_app extract_and_rewrite policy_wrapper.ptx policy.ptx
 
 # Target binary (contains kernels to extract)
 sample_app: sample_app.cu
@@ -14,7 +14,11 @@ sample_app: sample_app.cu
 extract_and_rewrite: extract_and_rewrite.cu extractor.h
 	$(NVCC) $(NVCC_FLAGS) $< -o $@ -lcuda -lnvJitLink
 
-# Policy PTX
+# Policy wrapper PTX (calls extracted kernels)
+policy_wrapper.ptx: policy_wrapper.cu
+	$(NVCC) $(PTX_FLAGS) -ptx $< -o $@
+
+# Standalone policy PTX (old version, kept for reference)
 policy.ptx: policy.cu
 	$(NVCC) $(PTX_FLAGS) -ptx $< -o $@
 
@@ -55,8 +59,8 @@ help:
 	@echo ""
 	@echo "This demo shows:"
 	@echo "  1. cuobjdump to extract kernels from binaries"
-	@echo "  2. Policy injection into extracted code"
-	@echo "  3. JIT rewriting without source code"
+	@echo "  2. nvJitLink to link extracted CUBIN with policy PTX"
+	@echo "  3. Policy wrappers calling original extracted kernels"
 	@echo "  4. Real-world binary rewriting workflow"
 
 .PHONY: all run extract clean help

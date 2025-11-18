@@ -13,6 +13,8 @@
 #include <string>
 #include <fstream>
 #include <sstream>
+#include <regex>
+#include "ptx_modifier.h"
 
 // Error checking
 #define CHECK_CU(call) do { \
@@ -108,14 +110,31 @@ public:
         std::string cmd = "cuobjdump -symbols " + std::string(cubinFile);
         system(cmd.c_str());
     }
+
+    // Extract PTX and convert entry points to device functions
+    bool extractAndConvertPTX(const char* outputPTX) {
+        printf("\n=== Extracting PTX from Binary ===\n");
+        printf("Binary: %s\n", binaryPath.c_str());
+        printf("Output: %s\n", outputPTX);
+
+        if (!PTXModifier::extractAndModifyPTX(binaryPath.c_str(), outputPTX)) {
+            fprintf(stderr, "Failed to extract and modify PTX\n");
+            return false;
+        }
+
+        printf("✓ Extracted PTX and converted .entry → .func\n");
+        printf("  Original kernels are now callable from device code!\n");
+
+        return true;
+    }
 };
 
 class JITRewriter {
 private:
-    std::vector<char> extractedCubin;
+    std::vector<char> extractedPTX;  // Changed from CUBIN to PTX
     std::vector<char> policyPTX;
     std::vector<char> linkedCubin;
-    CUlibrary library;
+    CUmodule module;
     bool loaded;
 
     std::vector<char> readFile(const char* filename) {
@@ -138,24 +157,30 @@ private:
     }
 
 public:
-    JITRewriter() : library(nullptr), loaded(false) {}
+    JITRewriter() : module(nullptr), loaded(false) {}
 
     ~JITRewriter() {
-        if (library) {
-            cudaLibraryUnload(library);
+        if (module) {
+            cuModuleUnload(module);
         }
     }
 
-    bool loadExtractedCubin(const char* cubinFile) {
-        printf("\n=== Loading Extracted Kernel ===\n");
-        printf("File: %s\n", cubinFile);
+    bool loadExtractedPTX(const char* ptxFile) {
+        printf("\n=== Loading Extracted PTX (Modified) ===\n");
+        printf("File: %s\n", ptxFile);
 
-        extractedCubin = readFile(cubinFile);
-        if (extractedCubin.empty()) {
+        extractedPTX = readFile(ptxFile);
+        if (extractedPTX.empty()) {
             return false;
         }
 
-        printf("✓ Loaded extracted CUBIN (%zu bytes)\n", extractedCubin.size());
+        // Ensure null-termination for PTX
+        if (extractedPTX.back() != '\0') {
+            extractedPTX.push_back('\0');
+        }
+
+        printf("✓ Loaded extracted PTX (%zu bytes)\n", extractedPTX.size());
+        printf("  (Converted from .entry to .func for device-level linking)\n");
         return true;
     }
 
@@ -168,40 +193,117 @@ public:
             return false;
         }
 
+        // Ensure null-termination for PTX
+        if (policyPTX.back() != '\0') {
+            policyPTX.push_back('\0');
+        }
+
         printf("✓ Loaded policy PTX (%zu bytes)\n", policyPTX.size());
         return true;
     }
 
-    bool linkAndLoad(int major, int minor) {
-        printf("\n=== Linking with nvJitLink ===\n");
-
-        // For this demo, we'll directly load the policy PTX
-        // In a real scenario, you would link extracted CUBIN with policy PTX
-
-        // Option 1: Load policy directly (simpler for demo)
-        printf("Loading policy as library...\n");
-
-        cudaError_t err = cudaLibraryLoadData(&library, policyPTX.data(), nullptr, nullptr, 0,
-                                              nullptr, nullptr, 0);
-        if (err != cudaSuccess) {
-            fprintf(stderr, "Failed to load library: %s\n", cudaGetErrorString(err));
+    bool linkAndLoad(int major, int minor, bool useNvJitLink = true) {
+        if (policyPTX.empty()) {
+            fprintf(stderr, "Policy not loaded!\n");
             return false;
         }
 
-        printf("✓ Loaded policy library\n");
+        if (!useNvJitLink || extractedPTX.empty()) {
+            // Fallback: Load standalone policy
+            printf("\n=== Loading Policy Module (Standalone) ===\n");
+            CHECK_CU(cuModuleLoadData(&module, policyPTX.data()));
+            printf("✓ Loaded policy module\n");
+            loaded = true;
+            return true;
+        }
+
+        // Real nvJitLink approach with extracted PTX
+        printf("\n=== Linking with nvJitLink ===\n");
+        printf("Linking extracted PTX (modified) + policy PTX...\n");
+
+        nvJitLinkHandle handle;
+
+        char archOpt[32];
+        snprintf(archOpt, sizeof(archOpt), "-arch=sm_%d%d", major, minor);
+
+        const char* options[] = {archOpt, "-O3"};
+
+        CHECK_NVJITLINK(nvJitLinkCreate(&handle, 2, options));
+        printf("✓ Created nvJitLink handle\n");
+        printf("  Options: %s -O3\n", archOpt);
+
+        // Add extracted PTX (now with .func instead of .entry)
+        nvJitLinkResult addResult = nvJitLinkAddData(handle, NVJITLINK_INPUT_PTX,
+                                         extractedPTX.data(), extractedPTX.size(),
+                                         "extracted_kernels");
+        if (addResult != NVJITLINK_SUCCESS) {
+            size_t logSize;
+            nvJitLinkGetErrorLogSize(handle, &logSize);
+            if (logSize > 0) {
+                std::vector<char> log(logSize);
+                nvJitLinkGetErrorLog(handle, log.data());
+                fprintf(stderr, "Failed to add extracted PTX:\n%s\n", log.data());
+            }
+            nvJitLinkDestroy(&handle);
+            return false;
+        }
+        printf("✓ Added extracted PTX (%zu bytes)\n", extractedPTX.size());
+
+        // Add policy wrapper PTX
+        CHECK_NVJITLINK(nvJitLinkAddData(handle, NVJITLINK_INPUT_PTX,
+                                         policyPTX.data(), policyPTX.size(),
+                                         "policy_wrapper"));
+        printf("✓ Added policy wrapper PTX (%zu bytes)\n", policyPTX.size());
+
+        // Complete the link
+        printf("Linking...\n");
+        nvJitLinkResult linkResult = nvJitLinkComplete(handle);
+
+        if (linkResult != NVJITLINK_SUCCESS) {
+            size_t logSize;
+            nvJitLinkGetErrorLogSize(handle, &logSize);
+            if (logSize > 0) {
+                std::vector<char> log(logSize);
+                nvJitLinkGetErrorLog(handle, log.data());
+                fprintf(stderr, "Link error:\n%s\n", log.data());
+            }
+            nvJitLinkDestroy(&handle);
+            return false;
+        }
+
+        printf("✓ Linking completed successfully!\n");
+
+        // Get linked CUBIN
+        size_t cubinSize;
+        CHECK_NVJITLINK(nvJitLinkGetLinkedCubinSize(handle, &cubinSize));
+        linkedCubin.resize(cubinSize);
+        CHECK_NVJITLINK(nvJitLinkGetLinkedCubin(handle, linkedCubin.data()));
+
+        printf("✓ Generated linked CUBIN (%zu bytes)\n", cubinSize);
+        printf("  Extracted: %zu bytes + Policy: %zu bytes → Linked: %zu bytes\n",
+               extractedPTX.size(), policyPTX.size(), cubinSize);
+
+        nvJitLinkDestroy(&handle);
+
+        // Load the linked module
+        CHECK_CU(cuModuleLoadData(&module, linkedCubin.data()));
+        printf("✓ Loaded linked module\n");
+
         loaded = true;
         return true;
     }
 
-    bool getKernel(CUkernel* kernel, const char* name) {
+    bool getKernel(CUfunction* kernel, const char* name) {
         if (!loaded) {
-            fprintf(stderr, "Library not loaded!\n");
+            fprintf(stderr, "Module not loaded!\n");
             return false;
         }
 
-        cudaError_t err = cudaLibraryGetKernel(kernel, library, name);
-        if (err != cudaSuccess) {
-            fprintf(stderr, "Failed to get kernel: %s (%s)\n", name, cudaGetErrorString(err));
+        CUresult res = cuModuleGetFunction(kernel, module, name);
+        if (res != CUDA_SUCCESS) {
+            const char* errName = nullptr;
+            cuGetErrorName(res, &errName);
+            fprintf(stderr, "Failed to get kernel: %s (%s)\n", name, errName ? errName : "unknown");
             return false;
         }
 
