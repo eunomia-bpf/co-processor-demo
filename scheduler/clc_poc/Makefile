@@ -15,7 +15,7 @@ NVCC_13_0 = $(CUDA_13_0)/bin/nvcc
 ARCH = sm_120
 
 # Common flags
-NVCC_FLAGS = -arch=$(ARCH) --no-device-link
+NVCC_FLAGS = -arch=$(ARCH)
 GCC = gcc
 GCC_FLAGS = -I$(CUDA_12_8)/include -L$(CUDA_12_8)/lib64 -lcuda
 

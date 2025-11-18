@@ -10,7 +10,7 @@ It also supports multi-turn conversation out of the box, and native support for 
 
 ### UPDATE
 [Oct-27-25] Added single prompt mode (-q flag) for non-interactive usage
-[Oct-27-25] Updated Makefile with --no-device-link flag and download-model target
+[Oct-27-25] Updated Makefile with flag and download-model target
 [Aug-08-25] Remove the nonsense loop. TPS increased from ~35 to ~39. Set base for benchmarking.
 [What's next] Improve kernels
 
@@ -47,7 +47,7 @@ make runcublas
 
 The Makefile now includes:
 - **`make download-model`**: Automatically downloads the 3GB FP32 model using wget/curl (no Git LFS required)
-- **Fixed compilation flags**: Added `-Wno-deprecated-gpu-targets --no-device-link` to fix build issues on newer CUDA versions
+- **Fixed compilation flags**: Added `-Wno-deprecated-gpu-targets` to fix build issues on newer CUDA versions
 - **Clean target**: `make clean` removes built binaries
 
 ## Description

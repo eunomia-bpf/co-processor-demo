@@ -5,7 +5,7 @@
 all: uvmbench
 
 uvmbench: main.cu kernels/synthetic.cuh
-	nvcc -arch=sm_120 -O3 --no-device-link -I. -o uvmbench main.cu -lcudart
+	nvcc -arch=sm_120 -O3 -I. -o uvmbench main.cu -lcudart
 
 clean:
 	rm -f uvmbench *.o

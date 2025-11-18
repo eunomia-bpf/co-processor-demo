@@ -19,7 +19,7 @@ WRAPPER_CUBIN = wrapper_kernel.cubin
 CUDA_ARCH = sm_120
 
 # Compiler flags for main app
-NVCCFLAGS = -arch=$(CUDA_ARCH) -O3 -std=c++11 --no-device-link
+NVCCFLAGS = -arch=$(CUDA_ARCH) -O3 -std=c++11
 
 # Cubin compilation flags
 CUBIN_FLAGS = -arch=$(CUDA_ARCH) -O3 -std=c++11

@@ -387,11 +387,11 @@ make help
 
 ```bash
 # Minimal CLC example (CUDA 12.9)
-/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 --no-device-link -O3 \
+/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 -O3 \
     -o minimal_clc_12.9_api minimal_clc_12.9.cu
 
 # Comprehensive benchmark (CUDA 12.9)
-/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 --no-device-link -O3 \
+/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 -O3 \
     -o clc_benchmark clc_benchmark.cu
 
 # Run minimal example
@@ -495,7 +495,7 @@ See **`BENCHMARK_RESULTS.md`** for:
 
 **Solution:** You're using CUDA 12.8. Upgrade to CUDA 12.9:
 ```bash
-/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 --no-device-link -o program program.cu
+/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 -o program program.cu
 ```
 
 ---
@@ -510,7 +510,7 @@ See **`BENCHMARK_RESULTS.md`** for:
 
 **Solution:** Add `--no-device-link` flag:
 ```bash
-nvcc -arch=sm_120 --no-device-link -o program program.cu
+nvcc -arch=sm_120 -o program program.cu
 ```
 
 ---

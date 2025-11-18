@@ -11,11 +11,11 @@ LIB_PATH ?= $(CUDA_INSTALL_PATH)/lib64
 # Use -Xcompiler to pass frame pointer flag to host compiler for eBPF stack unwinding
 .PHONY: runcu
 runcu: runcu.cu
-	$(NVCC) $(INCLUDES) -O2 -Xcompiler -fno-omit-frame-pointer -Wno-deprecated-gpu-targets --no-device-link -o runcu runcu.cu -L $(LIB_PATH) -lcudart -lm
+	$(NVCC) $(INCLUDES) -O2 -Xcompiler -fno-omit-frame-pointer -Wno-deprecated-gpu-targets -o runcu runcu.cu -L $(LIB_PATH) -lcudart -lm
 # compile cublas included
 .PHONY: runcublas
 runcublas: runcu.cu
-	$(NVCC) $(INCLUDES) -O3 -Wno-deprecated-gpu-targets --no-device-link -DUSE_CUBLAS -o runcublas runcu.cu -L $(LIB_PATH) -lcudart -lm -lcublas
+	$(NVCC) $(INCLUDES) -O3 -Wno-deprecated-gpu-targets -DUSE_CUBLAS -o runcublas runcu.cu -L $(LIB_PATH) -lcudart -lm -lcublas
 
 # download the model
 .PHONY: download-model

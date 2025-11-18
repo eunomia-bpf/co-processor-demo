@@ -93,7 +93,7 @@ clusterlaunchcontrol.query_cancel.get_first_ctaid::x.b32.b128 ret, B128_response
 
 **Commands:**
 ```bash
-/usr/local/cuda-13.0/bin/nvcc -arch=sm_120 --no-device-link -o clc_v2 minimal_clc_ptx_v2.cu
+/usr/local/cuda-13.0/bin/nvcc -arch=sm_120 -o clc_v2 minimal_clc_ptx_v2.cu
 ```
 
 **Result:** Binary created ✅ (974 KB)
@@ -140,7 +140,7 @@ gcc -o cubin_loader_simple cubin_loader_simple.c -lcuda
 
 **Commands:**
 ```bash
-/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 --no-device-link -o test_vec_add test_vec_add.cu
+/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 -o test_vec_add test_vec_add.cu
 ./test_vec_add
 ```
 
@@ -176,7 +176,7 @@ int bx = ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x<int>(clc_respo
 
 **Commands:**
 ```bash
-/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 --no-device-link -o minimal_clc_12.9_api minimal_clc_12.9.cu
+/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 -o minimal_clc_12.9_api minimal_clc_12.9.cu
 ./minimal_clc_12.9_api
 ```
 

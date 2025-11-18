@@ -11,7 +11,7 @@ NVCC = $(CUDA_12_9)/bin/nvcc
 ARCH = sm_120
 
 # Compiler flags
-NVCC_FLAGS = -arch=$(ARCH) --no-device-link -O3
+NVCC_FLAGS = -arch=$(ARCH) -O3
 
 # ============================================
 # BUILD TARGETS

@@ -38,12 +38,12 @@ def fix_makefile_arch(makefile_path):
     with open(makefile_path, 'r') as f:
         content = f.read()
 
-    # Remove deprecated warnings flag and ensure --no-device-link
+    # Remove deprecated warnings flag and ensure
     content = content.replace('-Wno-deprecated-gpu-targets', '')
 
-    # Ensure --no-device-link is present for device linking
+    # Ensure is present for device linking
     if '--no-device-link' not in content and 'nvcc' in content:
-        content = content.replace('$(CC)', '$(CC) --no-device-link')
+        content = content.replace('$(CC)', '$(CC)')
 
     with open(makefile_path, 'w') as f:
         f.write(content)
@@ -229,14 +229,14 @@ def fix_polybench_benchmarks(root, version='UVM_benchmarks'):
 
     polybench_dir = root / version / 'polybench'
 
-    # Fix common.mk to add --no-device-link
+    # Fix common.mk to add
     common_mk = polybench_dir / 'common.mk'
     if common_mk.exists():
         with open(common_mk, 'r') as f:
             content = f.read()
 
         if '--no-device-link' not in content:
-            content = content.replace('nvcc -O3', 'nvcc -O3 --no-device-link -arch=sm_90')
+            content = content.replace('nvcc -O3', 'nvcc -O3 -arch=sm_90')
 
         with open(common_mk, 'w') as f:
             f.write(content)

@@ -487,7 +487,7 @@ make help
 
 ```bash
 # Working example (CUDA 12.9)
-/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 --no-device-link \
+/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 \
     -o minimal_clc_12.9_api minimal_clc_12.9.cu
 
 # Run it
@@ -571,7 +571,7 @@ CLC is most beneficial when:
 
 **Solution:** You're using CUDA 12.8. Upgrade to CUDA 12.9:
 ```bash
-/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 --no-device-link -o program program.cu
+/usr/local/cuda-12.9/bin/nvcc -arch=sm_120 -o program program.cu
 ```
 
 ---
@@ -586,7 +586,7 @@ CLC is most beneficial when:
 
 **Solution:** Add `--no-device-link` flag:
 ```bash
-nvcc -arch=sm_120 --no-device-link -o program program.cu
+nvcc -arch=sm_120 -o program program.cu
 ```
 
 ---

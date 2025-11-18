@@ -740,10 +740,13 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
     }
 
     // start the main loop
-    long start = 0;  // used to time our code, only initialized after first iteration
+    long start_time = time_in_ms();  // start timing from the beginning
+    long first_token_time = 0;  // time when first token is generated
     int next;        // will store the next token in the sequence
     int token = prompt_tokens[0]; // kick off with the first token in the prompt
     int pos = 0;     // position in the sequence
+    int generated_tokens = 0; // count of generated tokens
+
     while (pos < steps) {
 
         // forward the transformer to get logits for the next token
@@ -756,6 +759,12 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
         } else {
             // otherwise sample the next token from the logits
             next = sample(sampler, logits);
+
+            // record time of first generated token
+            if (generated_tokens == 0) {
+                first_token_time = time_in_ms();
+            }
+            generated_tokens++;
         }
         pos++;
 
@@ -767,16 +776,19 @@ void generate(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler, 
         safe_printf(piece); // same as printf("%s", piece), but skips "unsafe" bytes
         fflush(stdout);
         token = next;
-
-        // init the timer here because the first iteration can be slower
-        if (start == 0) { start = time_in_ms(); }
     }
     printf("\n");
 
-    // report achieved tok/s (pos-1 because the timer starts after first iteration)
-    if (pos > 1) {
-        long end = time_in_ms();
-        fprintf(stderr, "achieved tok/s: %f\n", (pos-1) / (double)(end-start)*1000);
+    // report metrics
+    if (generated_tokens > 0) {
+        long end_time = time_in_ms();
+        double ttft = (first_token_time - start_time) / 1000.0;
+        double total_time = (end_time - first_token_time) / 1000.0;
+        double tokens_per_sec = total_time > 0 ? generated_tokens / total_time : 0;
+
+        fprintf(stderr, "\nTTFT: %.3f s\n", ttft);
+        fprintf(stderr, "Generated tokens: %d\n", generated_tokens);
+        fprintf(stderr, "Tokens per second: %.2f tok/s\n", tokens_per_sec);
     }
 
     free(prompt_tokens);
@@ -811,6 +823,12 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
     int* prompt_tokens = (int*)malloc(1152 * sizeof(int));
     int user_idx;
 
+    // timing variables
+    long start_time = 0;
+    long first_token_time = 0;
+    int generated_tokens = 0;
+    int track_metrics = 0;
+
     // start the main loop
     int8_t user_turn = 1; // user starts
     int next;        // will store the next token in the sequence
@@ -821,6 +839,22 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
 
         // when it is the user's turn to contribute tokens to the dialog...
         if (user_turn) {
+            // print metrics from previous turn
+            if (track_metrics && generated_tokens > 0) {
+                long end_time = time_in_ms();
+                double ttft = (first_token_time - start_time) / 1000.0;
+                double total_time = (end_time - first_token_time) / 1000.0;
+                double tokens_per_sec = total_time > 0 ? generated_tokens / total_time : 0;
+
+                fprintf(stderr, "\nTTFT: %.3f s\n", ttft);
+                fprintf(stderr, "Generated tokens: %d\n", generated_tokens);
+                fprintf(stderr, "Tokens per second: %.2f tok/s\n", tokens_per_sec);
+            }
+
+            // reset metrics for new turn
+            generated_tokens = 0;
+            track_metrics = 0;
+
             // get the (optional) system prompt at position 0
             if (pos == 0) {
                 // at position 0, the user can also contribute a system prompt
@@ -853,6 +887,8 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
             user_idx = 0; // reset the user index
             user_turn = 0;
             printf("Assistant: ");
+            start_time = time_in_ms();
+            track_metrics = 1;
         }
 
         // determine the token to pass into the transformer next
@@ -872,6 +908,12 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
         pos++;
 
         if (user_idx >= num_prompt_tokens && next != 2) {
+            // record first token time
+            if (generated_tokens == 0) {
+                first_token_time = time_in_ms();
+            }
+            generated_tokens++;
+
             // the Assistant is responding, so print its output
             char* piece = decode(tokenizer, token, next);
             safe_printf(piece); // same as printf("%s", piece), but skips "unsafe" bytes
