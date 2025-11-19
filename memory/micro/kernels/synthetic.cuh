@@ -27,6 +27,28 @@ struct KernelResult {
 };
 
 // ============================================================================
+// UVM Memory Advise Helper
+// ============================================================================
+
+inline void apply_uvm_hints(void* ptr, size_t bytes, const std::string& mode, int dev) {
+    if (mode == "uvm_prefetch") {
+        CUDA_CHECK(cudaMemPrefetchAsync(ptr, bytes, dev, 0));
+    } else if (mode == "uvm_advise_read") {
+        // Set read-mostly: creates read-only copies across processors
+        CUDA_CHECK(cudaMemAdvise(ptr, bytes, cudaMemAdviseSetReadMostly, dev));
+    } else if (mode == "uvm_advise_pref_gpu") {
+        // Set preferred location to GPU
+        CUDA_CHECK(cudaMemAdvise(ptr, bytes, cudaMemAdviseSetPreferredLocation, dev));
+    } else if (mode == "uvm_advise_pref_cpu") {
+        // Set preferred location to CPU
+        CUDA_CHECK(cudaMemAdvise(ptr, bytes, cudaMemAdviseSetPreferredLocation, cudaCpuDeviceId));
+    } else if (mode == "uvm_advise_access") {
+        // Declare that GPU will access this memory
+        CUDA_CHECK(cudaMemAdvise(ptr, bytes, cudaMemAdviseSetAccessedBy, dev));
+    }
+}
+
+// ============================================================================
 // Generic timing and statistics template
 // ============================================================================
 
@@ -150,13 +172,15 @@ inline void run_seq_stream(size_t total_working_set, const std::string& mode, si
         }
     }
 
-    // Prefetch for uvm_prefetch mode
-    if (mode == "uvm_prefetch") {
+    // Apply UVM hints (prefetch, advise, etc.)
+    if (mode != "device" && mode != "uvm") {
         int dev;
         CUDA_CHECK(cudaGetDevice(&dev));
-        CUDA_CHECK(cudaMemPrefetchAsync(input, array_bytes, dev, 0));
-        CUDA_CHECK(cudaMemPrefetchAsync(output, array_bytes, dev, 0));
-        CUDA_CHECK(cudaDeviceSynchronize());
+        apply_uvm_hints(input, array_bytes, mode, dev);
+        apply_uvm_hints(output, array_bytes, mode, dev);
+        if (mode == "uvm_prefetch") {
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
     }
 
     // Chunk-based configuration
@@ -285,13 +309,15 @@ inline void run_rand_stream(size_t total_working_set, const std::string& mode, s
         }
     }
 
-    // Prefetch for uvm_prefetch mode
-    if (mode == "uvm_prefetch") {
+    // Apply UVM hints (prefetch, advise, etc.)
+    if (mode != "device" && mode != "uvm") {
         int dev;
         CUDA_CHECK(cudaGetDevice(&dev));
-        CUDA_CHECK(cudaMemPrefetchAsync(input, array_bytes, dev, 0));
-        CUDA_CHECK(cudaMemPrefetchAsync(output, array_bytes, dev, 0));
-        CUDA_CHECK(cudaDeviceSynchronize());
+        apply_uvm_hints(input, array_bytes, mode, dev);
+        apply_uvm_hints(output, array_bytes, mode, dev);
+        if (mode == "uvm_prefetch") {
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
     }
 
     // Chunk-based configuration (same as sequential)
@@ -445,13 +471,15 @@ inline void run_pointer_chase(size_t total_working_set, const std::string& mode,
     init_chunks_kernel<<<init_numBlocks, init_blockSize>>>(nodes, nodes_per_chunk, total_chunks);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // Prefetch for uvm_prefetch mode
-    if (mode == "uvm_prefetch") {
+    // Apply UVM hints (prefetch, advise, etc.)
+    if (mode != "device" && mode != "uvm") {
         int dev;
         CUDA_CHECK(cudaGetDevice(&dev));
-        CUDA_CHECK(cudaMemPrefetchAsync(nodes, nodes_bytes, dev, 0));
-        CUDA_CHECK(cudaMemPrefetchAsync(output_array, output_bytes, dev, 0));
-        CUDA_CHECK(cudaDeviceSynchronize());
+        apply_uvm_hints(nodes, nodes_bytes, mode, dev);
+        apply_uvm_hints(output_array, output_bytes, mode, dev);
+        if (mode == "uvm_prefetch") {
+            CUDA_CHECK(cudaDeviceSynchronize());
+        }
     }
 
     // Pointer chase steps: keep it small for reasonable runtime

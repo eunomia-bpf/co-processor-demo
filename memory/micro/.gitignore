@@ -1,6 +1,4 @@
-*.csv
 uvmbench
 *.log
-*.pdf
 *.png
 
