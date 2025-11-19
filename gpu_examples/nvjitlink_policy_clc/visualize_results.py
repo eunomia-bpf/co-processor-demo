@@ -22,10 +22,24 @@ def load_results(csv_file):
 
 def plot_performance_comparison(df, output_dir):
     """Plot throughput performance comparison across patterns and policies"""
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-
     # Get unique sizes
     sizes = df['size'].unique()
+    num_sizes = len(sizes)
+
+    # Dynamically create subplots based on number of sizes
+    if num_sizes == 1:
+        fig, axes = plt.subplots(1, 1, figsize=(10, 6))
+        axes = [axes]
+    elif num_sizes == 2:
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    elif num_sizes <= 4:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        axes = axes.flatten()
+    else:
+        # For more than 4, use 2 rows
+        ncols = (num_sizes + 1) // 2
+        fig, axes = plt.subplots(2, ncols, figsize=(8*ncols, 12))
+        axes = axes.flatten()
 
     for idx, size in enumerate(sizes):
         df_size = df[df['size'] == size]
@@ -48,7 +62,7 @@ def plot_performance_comparison(df, output_dir):
         df_plot = pd.DataFrame(configs)
 
         # Create grouped bar plot
-        ax = axes[idx] if len(sizes) > 1 else axes
+        ax = axes[idx]
 
         # Pivot for grouped bar chart
         pivot_data = df_plot.pivot(index='pattern', columns='config', values='gflops')
@@ -70,9 +84,22 @@ def plot_performance_comparison(df, output_dir):
 
 def plot_speedup_analysis(df, output_dir):
     """Plot speedup factors for each policy vs original"""
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-
     sizes = df['size'].unique()
+    num_sizes = len(sizes)
+
+    # Dynamically create subplots based on number of sizes
+    if num_sizes == 1:
+        fig, axes = plt.subplots(1, 1, figsize=(10, 6))
+        axes = [axes]
+    elif num_sizes == 2:
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    elif num_sizes <= 4:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        axes = axes.flatten()
+    else:
+        ncols = (num_sizes + 1) // 2
+        fig, axes = plt.subplots(2, ncols, figsize=(8*ncols, 12))
+        axes = axes.flatten()
 
     for idx, size in enumerate(sizes):
         df_size = df[df['size'] == size]
@@ -96,7 +123,7 @@ def plot_speedup_analysis(df, output_dir):
         df_speedup = pd.DataFrame(speedups)
 
         # Create grouped bar plot
-        ax = axes[idx] if len(sizes) > 1 else axes
+        ax = axes[idx]
 
         pivot_speedup = df_speedup.pivot(index='pattern', columns='policy', values='speedup')
         pivot_speedup.plot(kind='bar', ax=ax, width=0.8)
@@ -119,9 +146,22 @@ def plot_speedup_analysis(df, output_dir):
 
 def plot_latency_comparison(df, output_dir):
     """Plot latency (execution time) comparison"""
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
-
     sizes = df['size'].unique()
+    num_sizes = len(sizes)
+
+    # Dynamically create subplots based on number of sizes
+    if num_sizes == 1:
+        fig, axes = plt.subplots(1, 1, figsize=(10, 6))
+        axes = [axes]
+    elif num_sizes == 2:
+        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    elif num_sizes <= 4:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        axes = axes.flatten()
+    else:
+        ncols = (num_sizes + 1) // 2
+        fig, axes = plt.subplots(2, ncols, figsize=(8*ncols, 12))
+        axes = axes.flatten()
 
     for idx, size in enumerate(sizes):
         df_size = df[df['size'] == size]
@@ -142,7 +182,7 @@ def plot_latency_comparison(df, output_dir):
 
         df_time = pd.DataFrame(times)
 
-        ax = axes[idx] if len(sizes) > 1 else axes
+        ax = axes[idx]
 
         pivot_time = df_time.pivot(index='pattern', columns='config', values='time')
         pivot_std = df_time.pivot(index='pattern', columns='config', values='time_std')
