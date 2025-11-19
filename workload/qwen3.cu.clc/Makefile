@@ -17,10 +17,25 @@ PTX_FLAGS = $(NVCC_FLAGS) --relocatable-device-code=true
 runcu: runcu.cu
 	$(NVCC) $(INCLUDES) -O2 -Xcompiler -fno-omit-frame-pointer -Wno-deprecated-gpu-targets -o runcu runcu.cu -L $(LIB_PATH) -lcudart -lm
 
+# compile with launch overhead measurement
+.PHONY: runcu_measure
+runcu_measure: runcu.cu
+	$(NVCC) $(INCLUDES) -O2 -Xcompiler -fno-omit-frame-pointer -Wno-deprecated-gpu-targets -DMEASURE_LAUNCH_OVERHEAD -o runcu_measure runcu.cu -L $(LIB_PATH) -lcudart -lm
+
 # compile cublas included
 .PHONY: runcublas
 runcublas: runcu.cu
 	$(NVCC) $(INCLUDES) -O3 -Wno-deprecated-gpu-targets -DUSE_CUBLAS -o runcublas runcu.cu -L $(LIB_PATH) -lcudart -lm -lcublas
+
+# compile with direct CLC (no framework) to measure pure CLC overhead
+.PHONY: runcu_clc
+runcu_clc: runcu.cu
+	$(NVCC) $(NVCC_FLAGS) -O2 -Xcompiler -fno-omit-frame-pointer -DUSE_DIRECT_CLC -o runcu_clc runcu.cu -lcudart -lm
+
+# compile with driver API (cuLaunchKernel) to isolate driver API overhead
+.PHONY: runcu_driver
+runcu_driver: runcu.cu
+	$(NVCC) $(INCLUDES) -O2 -Xcompiler -fno-omit-frame-pointer -Wno-deprecated-gpu-targets -DUSE_DRIVER_API -o runcu_driver runcu.cu -L $(LIB_PATH) -lcudart -lm -lcuda
 
 # Policy framework version - CLC scheduler version with policy framework
 # Compile with --keep-device-functions to preserve device functions in PTX
@@ -28,6 +43,11 @@ runcublas: runcu.cu
 .PHONY: runcu_policy
 runcu_policy: runcu.cu policy_framework.h
 	$(NVCC) $(NVCC_FLAGS) -O2 -Xcompiler -fno-omit-frame-pointer -DUSE_POLICY_FRAMEWORK --keep-device-functions runcu.cu -o runcu_policy -lcudart -lm -lcuda -lnvJitLink
+
+# Policy framework with launch overhead measurement
+.PHONY: runcu_policy_measure
+runcu_policy_measure: runcu.cu policy_framework.h
+	$(NVCC) $(NVCC_FLAGS) -O2 -Xcompiler -fno-omit-frame-pointer -DUSE_POLICY_FRAMEWORK -DMEASURE_LAUNCH_OVERHEAD --keep-device-functions runcu.cu -o runcu_policy_measure -lcudart -lm -lcuda -lnvJitLink
 
 # Wrapper kernel PTX (implements CLC scheduler with work-stealing for matmul)
 wrapper_kernel.ptx: wrapper_kernel.cu

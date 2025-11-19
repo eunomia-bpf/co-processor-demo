@@ -47,16 +47,11 @@ extern "C" __global__ void matmul_kernel_with_policy(
     // Dynamic shared memory for user kernel computation
     extern __shared__ float shared_x[];
 
-    // Initialize the scheduler policy (thread 0 only, then sync)
-    if (cg::thread_block::thread_rank() == 0) {
-        Policy_init(policy_state);
-    }
-    __syncthreads();
-
     // Initialize CLC barrier
     if (cg::thread_block::thread_rank() == 0) {
         ptx::mbarrier_init(&bar, 1);
     }
+    __syncthreads();
 
     // Get initial block assignment (1D grid for matmul)
     int bx = blockIdx.x;  // Logical block index (can be updated by CLC)
@@ -65,9 +60,9 @@ extern "C" __global__ void matmul_kernel_with_policy(
     while (true) {
         __syncthreads();
 
-        // ELECT-AND-BROADCAST PATTERN: Thread 0 evaluates policy
+        // ELECT-AND-BROADCAST PATTERN: NoSteal hardcoded (no function call)
         if (cg::thread_block::thread_rank() == 0) {
-            go = Policy_should_try_steal(policy_state, bx) ? 1 : 0;
+            go = 0;  // NoSteal: hardcoded, no function call overhead
         }
         __syncthreads();
 

@@ -15,6 +15,16 @@
 
 #include <cuda_runtime.h>
 
+#ifdef USE_DRIVER_API
+#include <cuda.h>
+#endif
+
+#ifdef USE_DIRECT_CLC
+#include <cuda/ptx>
+#include <cooperative_groups.h>
+namespace cg = cooperative_groups;
+namespace ptx = cuda::ptx;
+#endif
 
 #ifdef USE_CUBLAS
 #include <cublas_v2.h>
@@ -514,68 +524,308 @@ void matmul(float *xout, float *x, float *w, int n, int d)
 }
 #else
 
-#ifdef USE_POLICY_FRAMEWORK
+#ifdef USE_DIRECT_CLC
+// Direct CLC implementation without framework - to measure pure CLC overhead
+// Full CLC implementation with mbarrier and all operations (NoSteal behavior)
+__global__ void matmul_kernel(float *xout, float *x, float *w, int n, int d)
+{
+    #include <cuda/ptx>
+    #include <cooperative_groups.h>
+    namespace cg = cooperative_groups;
+    namespace ptx = cuda::ptx;
+
+    // CLC hardware state (same as wrapper_kernel.cu)
+    __shared__ uint4 result;
+    __shared__ uint64_t bar;
+    int phase = 0;
+
+    // Policy state
+    __shared__ char policy_state[64];
+    __shared__ int go;
+
+    extern __shared__ float shared_x[];
+
+    // Initialize mbarrier
+    if (cg::thread_block::thread_rank() == 0) {
+        ptx::mbarrier_init(&bar, 1);
+    }
+    __syncthreads();
+
+    // Get initial block assignment
+    int bx = blockIdx.x;
+
+    // FULL CLC work-stealing loop (same structure as wrapper_kernel.cu)
+    while (true) {
+        __syncthreads();
+
+        // ELECT-AND-BROADCAST PATTERN: NoSteal policy always returns false
+        if (cg::thread_block::thread_rank() == 0) {
+            go = 0;  // NoSteal: never try to steal
+        }
+        __syncthreads();
+
+        // Compute using logical block index
+        int i = bx * blockDim.x + threadIdx.x;
+        int tid = threadIdx.x;
+
+        // Load x into shared memory in chunks
+        for (int offset = 0; offset < n; offset += blockDim.x) {
+            if (offset + tid < n) {
+                shared_x[tid] = x[offset + tid];
+            }
+            __syncthreads();
+
+            if (i < d) {
+                float sum = 0.0f;
+                int chunk_size = min(blockDim.x, n - offset);
+
+                // Vectorized loads and computation
+                float4 *w_vec = (float4*)(w + i * n + offset);
+                float4 *x_vec = (float4*)shared_x;
+
+                int vec_ops = chunk_size / 4;
+                for (int v = 0; v < vec_ops; v++) {
+                    float4 w4 = w_vec[v];
+                    float4 x4 = x_vec[v];
+                    sum += w4.x * x4.x + w4.y * x4.y + w4.z * x4.z + w4.w * x4.w;
+                }
+
+                // Handle remaining elements
+                for (int j = vec_ops * 4; j < chunk_size; j++) {
+                    sum += w[i * n + offset + j] * shared_x[j];
+                }
+
+                if (offset == 0) xout[i] = sum;
+                else xout[i] += sum;
+            }
+            __syncthreads();
+        }
+
+        // Check if should try to steal (NoSteal: always false)
+        if (!go) {
+            break;  // Exit - no stealing
+        }
+
+        // If we reach here, try CLC operations (never executed with NoSteal)
+        if (cg::thread_block::thread_rank() == 0) {
+            ptx::fence_proxy_async_generic_sync_restrict(ptx::sem_acquire, ptx::space_cluster, ptx::scope_cluster);
+            cg::invoke_one(cg::coalesced_threads(), [&](){
+                ptx::clusterlaunchcontrol_try_cancel(&result, &bar);
+            });
+            ptx::mbarrier_arrive_expect_tx(ptx::sem_relaxed, ptx::scope_cta, ptx::space_shared, &bar, sizeof(uint4));
+        }
+
+        // Wait for CLC steal result
+        while (!ptx::mbarrier_try_wait_parity(ptx::sem_acquire, ptx::scope_cta, &bar, phase)) {}
+        phase ^= 1;
+
+        // Check if steal was successful
+        bool success = ptx::clusterlaunchcontrol_query_cancel_is_canceled(result);
+        if (!success) {
+            break;
+        }
+
+        // Get new block assignment
+        bx = ptx::clusterlaunchcontrol_query_cancel_get_first_ctaid_x<int>(result);
+
+        ptx::fence_proxy_async_generic_sync_restrict(ptx::sem_release, ptx::space_shared, ptx::scope_cluster);
+    }
+}
+#elif defined(USE_POLICY_FRAMEWORK)
 // User kernel as device function - will be extracted from binary using cuobjdump
 extern "C" __device__ void matmul_kernel_impl(float *xout, float *x, float *w, int n, int d)
-#else
-// Original: Standard CUDA global kernel
-__global__ void matmul_kernel(float *xout, float *x, float *w, int n, int d)
-#endif
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int tid = threadIdx.x;
-    
+
     extern __shared__ float shared_x[];
-    
+
     // Load x into shared memory in chunks
     for (int offset = 0; offset < n; offset += blockDim.x) {
         if (offset + tid < n) {
             shared_x[tid] = x[offset + tid];
         }
         __syncthreads();
-        
+
         if (i < d) {
             float sum = 0.0f;
             int chunk_size = min(blockDim.x, n - offset);
-            
+
             // Vectorized loads and computation
             float4 *w_vec = (float4*)(w + i * n + offset);
             float4 *x_vec = (float4*)shared_x;
-            
+
             int vec_ops = chunk_size / 4;
             for (int v = 0; v < vec_ops; v++) {
                 float4 w4 = w_vec[v];
                 float4 x4 = x_vec[v];
                 sum += w4.x * x4.x + w4.y * x4.y + w4.z * x4.z + w4.w * x4.w;
             }
-            
+
             // Handle remaining elements
             for (int j = vec_ops * 4; j < chunk_size; j++) {
                 sum += w[i * n + offset + j] * shared_x[j];
             }
-            
+
             if (offset == 0) xout[i] = sum;
             else xout[i] += sum;
         }
         __syncthreads();
     }
 }
+#else
+// Original: Standard CUDA global kernel
+__global__ void matmul_kernel(float *xout, float *x, float *w, int n, int d)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int tid = threadIdx.x;
+
+    extern __shared__ float shared_x[];
+
+    // Load x into shared memory in chunks
+    for (int offset = 0; offset < n; offset += blockDim.x) {
+        if (offset + tid < n) {
+            shared_x[tid] = x[offset + tid];
+        }
+        __syncthreads();
+
+        if (i < d) {
+            float sum = 0.0f;
+            int chunk_size = min(blockDim.x, n - offset);
+
+            // Vectorized loads and computation
+            float4 *w_vec = (float4*)(w + i * n + offset);
+            float4 *x_vec = (float4*)shared_x;
+
+            int vec_ops = chunk_size / 4;
+            for (int v = 0; v < vec_ops; v++) {
+                float4 w4 = w_vec[v];
+                float4 x4 = x_vec[v];
+                sum += w4.x * x4.x + w4.y * x4.y + w4.z * x4.z + w4.w * x4.w;
+            }
+
+            // Handle remaining elements
+            for (int j = vec_ops * 4; j < chunk_size; j++) {
+                sum += w[i * n + offset + j] * shared_x[j];
+            }
+
+            if (offset == 0) xout[i] = sum;
+            else xout[i] += sum;
+        }
+        __syncthreads();
+    }
+}
+#endif
+
+// Global timing statistics
+#ifdef MEASURE_LAUNCH_OVERHEAD
+static long long g_total_launch_time_us = 0;
+static long long g_total_kernel_time_us = 0;
+static int g_launch_count = 0;
+static int g_measured_count = 0;
+static const int MEASURE_EVERY_N = 100;  // Only measure every 100th call to avoid slowdown
+#endif
 
 void matmul(float *xout, float *x, float *w, int n, int d) {
     int block_size = 256;
     int grid_size = (d + block_size - 1) / block_size;
     int shared_mem = block_size * sizeof(float);
 
+#ifdef MEASURE_LAUNCH_OVERHEAD
+    g_launch_count++;
+    bool should_measure = (g_launch_count % MEASURE_EVERY_N) == 0;
+    cudaEvent_t start_launch, stop_launch, start_kernel, stop_kernel;
+
+    if (should_measure) {
+        cudaEventCreate(&start_launch);
+        cudaEventCreate(&stop_launch);
+        cudaEventCreate(&start_kernel);
+        cudaEventCreate(&stop_kernel);
+        cudaEventRecord(start_launch);
+    }
+#endif
+
 #ifdef USE_POLICY_FRAMEWORK
     // Use global policy framework (initialized at program start)
     dim3 gridDim(grid_size);
     dim3 blockDim(block_size);
+
+#ifdef MEASURE_LAUNCH_OVERHEAD
+    if (should_measure) cudaEventRecord(start_kernel);
+#endif
+
     g_policy_framework_ptr->launch_with_shared("matmul_kernel", gridDim, blockDim, shared_mem, 0, xout, x, w, n, d);
+
+#ifdef MEASURE_LAUNCH_OVERHEAD
+    if (should_measure) cudaEventRecord(stop_kernel);
+#endif
+#elif defined(USE_DRIVER_API)
+    // Test: Use cuLaunchKernel directly without framework overhead
+    static CUfunction func = nullptr;
+    static bool initialized = false;
+
+    if (!initialized) {
+        // Get kernel function once
+        CUmodule module;
+        cuModuleGetGlobal(nullptr, nullptr, module, "matmul_kernel");
+        cuModuleGetFunction(&func, module, "matmul_kernel");
+        initialized = true;
+    }
+
+    void* params[] = {&xout, &x, &w, &n, &d};
+    cuLaunchKernel(func, grid_size, 1, 1, block_size, 1, 1, shared_mem, 0, params, nullptr);
 #else
     // Original: Direct kernel launch
+#ifdef MEASURE_LAUNCH_OVERHEAD
+    if (should_measure) cudaEventRecord(start_kernel);
+#endif
+
     matmul_kernel<<<grid_size, block_size, shared_mem>>>(xout, x, w, n, d);
+
+#ifdef MEASURE_LAUNCH_OVERHEAD
+    if (should_measure) cudaEventRecord(stop_kernel);
+#endif
+#endif
+
+#ifdef MEASURE_LAUNCH_OVERHEAD
+    if (should_measure) {
+        cudaEventRecord(stop_launch);
+        cudaEventSynchronize(stop_launch);
+
+        float launch_ms, kernel_ms;
+        cudaEventElapsedTime(&launch_ms, start_launch, stop_launch);
+        cudaEventElapsedTime(&kernel_ms, start_kernel, stop_kernel);
+
+        g_total_launch_time_us += (long long)(launch_ms * 1000);
+        g_total_kernel_time_us += (long long)(kernel_ms * 1000);
+        g_measured_count++;
+
+        cudaEventDestroy(start_launch);
+        cudaEventDestroy(stop_launch);
+        cudaEventDestroy(start_kernel);
+        cudaEventDestroy(stop_kernel);
+    }
 #endif
 }
+
+#ifdef MEASURE_LAUNCH_OVERHEAD
+void print_launch_overhead_stats() {
+    if (g_measured_count > 0) {
+        double avg_launch_us = (double)g_total_launch_time_us / g_measured_count;
+        double avg_kernel_us = (double)g_total_kernel_time_us / g_measured_count;
+        double overhead_us = avg_launch_us - avg_kernel_us;
+
+        fprintf(stderr, "\n=== Kernel Launch Overhead Statistics ===\n");
+        fprintf(stderr, "Total launches: %d (measured: %d, every %dth call)\n",
+                g_launch_count, g_measured_count, MEASURE_EVERY_N);
+        fprintf(stderr, "Average launch time: %.2f us\n", avg_launch_us);
+        fprintf(stderr, "Average kernel time: %.2f us\n", avg_kernel_us);
+        fprintf(stderr, "Average overhead per launch: %.2f us\n", overhead_us);
+        fprintf(stderr, "Estimated total overhead: %.2f ms\n", overhead_us * g_launch_count / 1000.0);
+        fprintf(stderr, "=========================================\n\n");
+    }
+}
+#endif
 #endif
 
 // multihead attention
@@ -1517,7 +1767,12 @@ int main(int argc, char *argv[]) {
     }
 
     // run!
-    chat(&transformer, &tokenizer, &sampler, prompt, system_prompt, think_on, multi_turn, tps, &tb, single_prompt); 
+    chat(&transformer, &tokenizer, &sampler, prompt, system_prompt, think_on, multi_turn, tps, &tb, single_prompt);
+
+#ifdef MEASURE_LAUNCH_OVERHEAD
+    // Print launch overhead statistics
+    print_launch_overhead_stats();
+#endif
 
     // memory and file handles cleanup
     free_sampler(&sampler); 
