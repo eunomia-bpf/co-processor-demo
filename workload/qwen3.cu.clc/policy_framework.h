@@ -242,9 +242,15 @@ public:
     }
 
     bool link(int computeCapabilityMajor, int computeCapabilityMinor) {
-        if (userPTX.empty() || wrapperPTX.empty() || policyPTX.empty()) {
-            fprintf(stderr, "User kernel, wrapper, or policy not loaded!\n");
+        if (userPTX.empty() || wrapperPTX.empty()) {
+            fprintf(stderr, "User kernel or wrapper not loaded!\n");
             return false;
+        }
+
+        // Policy is optional - if not provided, wrapper_kernel.cu should have hardcoded behavior
+        bool has_policy = !policyPTX.empty();
+        if (!has_policy) {
+            std::cout << "Note: No policy PTX provided, using hardcoded wrapper behavior" << std::endl;
         }
 
         std::cout << "\n=== Linking with nvJitLink ===" << std::endl;
@@ -290,12 +296,14 @@ public:
                                          "wrapper_kernel"));
         std::cout << "✓ Added wrapper kernel PTX" << std::endl;
 
-        // Add policy PTX
-        std::cout << "Adding policy PTX (" << policyPTX.size() << " bytes)..." << std::endl;
-        CHECK_NVJITLINK(nvJitLinkAddData(handle, NVJITLINK_INPUT_PTX,
-                                         (void*)policyPTX.data(), policyPTX.size(),
-                                         "policy"));
-        std::cout << "✓ Added policy PTX" << std::endl;
+        // Add policy PTX (optional)
+        if (has_policy) {
+            std::cout << "Adding policy PTX (" << policyPTX.size() << " bytes)..." << std::endl;
+            CHECK_NVJITLINK(nvJitLinkAddData(handle, NVJITLINK_INPUT_PTX,
+                                             (void*)policyPTX.data(), policyPTX.size(),
+                                             "policy"));
+            std::cout << "✓ Added policy PTX" << std::endl;
+        }
 
         // Complete the link
         std::cout << "Linking..." << std::endl;
@@ -448,7 +456,8 @@ public:
 
 // MACRO: Setup policy framework with PTX auto-extraction from binary
 // Usage: POLICY_FRAMEWORK_SETUP_FULL_AUTO(framework_var)
-// Uses ENV variables: WRAPPER_KERNEL_PATH (default: ./wrapper_kernel), POLICY_PTX_PATH (default: ./policy.ptx)
+// Uses ENV variables: WRAPPER_KERNEL_PATH (default: ./wrapper_kernel), POLICY_PTX_PATH (optional)
+// If POLICY_PTX_PATH is not provided, wrapper_kernel.cu should have hardcoded behavior (no policy calls)
 #define POLICY_FRAMEWORK_SETUP_FULL_AUTO(fw) \
     PolicyFramework fw; \
     do { \
@@ -463,10 +472,7 @@ public:
             fprintf(stderr, "Failed to auto-load wrapper kernel\n"); \
             exit(EXIT_FAILURE); \
         } \
-        if (!fw.loadPolicyAuto()) { \
-            fprintf(stderr, "Failed to auto-load policy\n"); \
-            exit(EXIT_FAILURE); \
-        } \
+        fw.loadPolicyAuto();  /* Policy is optional - don't fail if not found */ \
         if (!fw.link(prop_##fw.major, prop_##fw.minor)) { \
             fprintf(stderr, "Failed to link framework\n"); \
             exit(EXIT_FAILURE); \

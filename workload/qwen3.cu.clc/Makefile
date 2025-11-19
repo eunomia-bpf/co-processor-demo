@@ -29,9 +29,26 @@ runcublas: runcu.cu
 runcu_policy: runcu.cu policy_framework.h
 	$(NVCC) $(NVCC_FLAGS) -O2 -Xcompiler -fno-omit-frame-pointer -DUSE_POLICY_FRAMEWORK --keep-device-functions runcu.cu -o runcu_policy -lcudart -lm -lcuda -lnvJitLink
 
-# Wrapper kernel PTX (implements CLC scheduler with work-stealing for matmul)
-wrapper_kernel.ptx: wrapper_kernel.cu
-	$(NVCC) $(PTX_FLAGS) -ptx wrapper_kernel.cu -o wrapper_kernel.ptx
+# Wrapper kernel PTX with INLINED policies (NEW - recommended)
+# Policy is selected via compile-time flag
+# Default: MaxSteals policy
+
+wrapper_kernel.ptx: wrapper_kernel_with_inline_policy.cu policy_maxsteals.cuh
+	$(NVCC) $(PTX_FLAGS) -ptx wrapper_kernel_with_inline_policy.cu -o wrapper_kernel.ptx
+
+wrapper_kernel_nosteal.ptx: wrapper_kernel_with_inline_policy.cu policy_nosteal.cuh
+	$(NVCC) $(PTX_FLAGS) -DPOLICY_NOSTEAL -ptx wrapper_kernel_with_inline_policy.cu -o wrapper_kernel_nosteal.ptx
+
+wrapper_kernel_maxsteals.ptx: wrapper_kernel_with_inline_policy.cu policy_maxsteals.cuh
+	$(NVCC) $(PTX_FLAGS) -DPOLICY_MAXSTEALS -ptx wrapper_kernel_with_inline_policy.cu -o wrapper_kernel_maxsteals.ptx
+
+wrapper_kernel_greedy.ptx: wrapper_kernel_with_inline_policy.cu policy_greedy.cuh
+	$(NVCC) $(PTX_FLAGS) -DPOLICY_GREEDY -ptx wrapper_kernel_with_inline_policy.cu -o wrapper_kernel_greedy.ptx
+
+# Wrapper kernel with SEPARATE policy PTX (OLD - requires separate policy.ptx file)
+# This version links policy at runtime via nvJitLink
+wrapper_kernel_with_separate_policy.ptx: wrapper_kernel_with_separate_policy.cu
+	$(NVCC) $(PTX_FLAGS) -ptx wrapper_kernel_with_separate_policy.cu -o wrapper_kernel_with_separate_policy.ptx
 
 # Policy PTX files - different scheduling policies
 policy_greedy.ptx: policy_greedy.cu
@@ -43,9 +60,73 @@ policy_maxsteals.ptx: policy_maxsteals.cu
 policy_nosteal.ptx: policy_nosteal.cu
 	$(NVCC) $(PTX_FLAGS) -ptx policy_nosteal.cu -o policy_nosteal.ptx
 
-# Build all policy components
+# Build all inlined policy variants
+.PHONY: wrapper-all
+wrapper-all: wrapper_kernel_nosteal.ptx wrapper_kernel_maxsteals.ptx wrapper_kernel_greedy.ptx
+
+# Build all policy components (old linked version)
 .PHONY: policy-all
 policy-all: runcu_policy wrapper_kernel.ptx policy_greedy.ptx policy_maxsteals.ptx policy_nosteal.ptx
+
+# Test targets for INLINED policies (NEW - recommended)
+.PHONY: test-nosteal test-maxsteals test-greedy
+test-nosteal: runcu_policy wrapper_kernel_nosteal.ptx
+	@echo "=== Testing NoSteal Policy (Inlined) ==="
+	WRAPPER_KERNEL_PATH=./wrapper_kernel_nosteal.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0
+
+test-maxsteals: runcu_policy wrapper_kernel_maxsteals.ptx
+	@echo "=== Testing MaxSteals Policy (Inlined) ==="
+	WRAPPER_KERNEL_PATH=./wrapper_kernel_maxsteals.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0
+
+test-greedy: runcu_policy wrapper_kernel_greedy.ptx
+	@echo "=== Testing Greedy Policy (Inlined) ==="
+	WRAPPER_KERNEL_PATH=./wrapper_kernel_greedy.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0
+
+# Test targets for SEPARATE policy PTX (OLD - slower due to no inlining)
+.PHONY: test-nosteal-linked test-maxsteals-linked test-greedy-linked
+test-nosteal-linked: runcu_policy wrapper_kernel_with_separate_policy.ptx policy_nosteal.ptx
+	@echo "=== Testing NoSteal Policy (Linked PTX - OLD) ==="
+	WRAPPER_KERNEL_PATH=./wrapper_kernel_with_separate_policy.ptx POLICY_PTX_PATH=./policy_nosteal.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0
+
+test-maxsteals-linked: runcu_policy wrapper_kernel_with_separate_policy.ptx policy_maxsteals.ptx
+	@echo "=== Testing MaxSteals Policy (Linked PTX - OLD) ==="
+	WRAPPER_KERNEL_PATH=./wrapper_kernel_with_separate_policy.ptx POLICY_PTX_PATH=./policy_maxsteals.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0
+
+test-greedy-linked: runcu_policy wrapper_kernel_with_separate_policy.ptx policy_greedy.ptx
+	@echo "=== Testing Greedy Policy (Linked PTX - OLD) ==="
+	WRAPPER_KERNEL_PATH=./wrapper_kernel_with_separate_policy.ptx POLICY_PTX_PATH=./policy_greedy.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0
+
+# Benchmark all implementations
+.PHONY: benchmark
+benchmark: runcu runcu_policy wrapper_kernel_nosteal.ptx wrapper_kernel_maxsteals.ptx wrapper_kernel_greedy.ptx wrapper_kernel_with_separate_policy.ptx policy_nosteal.ptx
+	@echo "=========================================="
+	@echo "CLC Policy Framework - Performance Benchmark"
+	@echo "=========================================="
+	@echo ""
+	@echo "BASELINE:"
+	@echo "---------"
+	@echo -n "Original (no CLC):        "
+	@./runcu Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0 2>&1 | grep -E "TTFT:|Tokens per second:" | tr '\n' ' ' && echo ""
+	@echo ""
+	@echo "INLINED POLICIES (Recommended):"
+	@echo "--------------------------------"
+	@echo -n "NoSteal (execute once):   "
+	@WRAPPER_KERNEL_PATH=./wrapper_kernel_nosteal.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0 2>&1 | grep -E "TTFT:|Tokens per second:" | tr '\n' ' ' && echo ""
+	@echo -n "MaxSteals (up to 8):      "
+	@WRAPPER_KERNEL_PATH=./wrapper_kernel_maxsteals.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0 2>&1 | grep -E "TTFT:|Tokens per second:" | tr '\n' ' ' && echo ""
+	@echo -n "Greedy (always steal):    "
+	@WRAPPER_KERNEL_PATH=./wrapper_kernel_greedy.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0 2>&1 | grep -E "TTFT:|Tokens per second:" | tr '\n' ' ' && echo ""
+	@echo ""
+	@echo "SEPARATE POLICIES (Old):"
+	@echo "------------------------"
+	@echo -n "NoSteal (linked PTX):     "
+	@WRAPPER_KERNEL_PATH=./wrapper_kernel_with_separate_policy.ptx POLICY_PTX_PATH=./policy_nosteal.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0 2>&1 | grep -E "TTFT:|Tokens per second:" | tr '\n' ' ' && echo ""
+	@echo ""
+	@echo "=========================================="
+	@echo "Source Files:"
+	@echo "  - wrapper_kernel_with_inline_policy.cu   (NEW)"
+	@echo "  - wrapper_kernel_with_separate_policy.cu (OLD)"
+	@echo "=========================================="
 
 # download the model
 .PHONY: download-model
