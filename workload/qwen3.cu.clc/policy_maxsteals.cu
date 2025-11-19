@@ -1,30 +1,30 @@
 // policy_maxsteals.cu
-// CLC MaxStealsPolicy - Stop after N executions
+// CLC MaxStealsPolicy - Stop after N work-stealing attempts
 
 #include <cuda_runtime.h>
 
 // ============================================================================
 // CLC Policy: MaxStealsPolicy
-// Stop after N executions (similar to max steals in CLC framework)
+// Stop after N work-stealing attempts (prevents excessive stealing)
 // ============================================================================
 
 struct MaxStealsPolicy_State {
-    int executions_done;
-    static constexpr int max_executions = 8;
+    int steals_done;
+    static constexpr int max_steals = 8;
 };
 
 extern "C" __device__ void Policy_init(void* state_ptr) {
     MaxStealsPolicy_State* s = (MaxStealsPolicy_State*)state_ptr;
-    s->executions_done = 0;
+    s->steals_done = 0;
 }
 
-extern "C" __device__ bool Policy_should_try(void* state_ptr, int current_block) {
+extern "C" __device__ bool Policy_should_try_steal(void* state_ptr, int current_block) {
     MaxStealsPolicy_State* s = (MaxStealsPolicy_State*)state_ptr;
-    bool can_execute = s->executions_done < MaxStealsPolicy_State::max_executions;
-    if (can_execute) {
-        s->executions_done++;
+    bool can_steal = s->steals_done < MaxStealsPolicy_State::max_steals;
+    if (can_steal) {
+        s->steals_done++;
     }
-    return can_execute;
+    return can_steal;
 }
 
 // Function pointer types
@@ -33,4 +33,4 @@ typedef bool (*policy_decision_func_t)(void*, int);
 
 // Policy function pointers
 extern "C" __device__ policy_init_func_t d_Policy_init = Policy_init;
-extern "C" __device__ policy_decision_func_t d_Policy_should_try = Policy_should_try;
+extern "C" __device__ policy_decision_func_t d_Policy_should_try_steal = Policy_should_try_steal;

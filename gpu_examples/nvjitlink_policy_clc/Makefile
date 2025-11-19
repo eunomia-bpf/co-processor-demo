@@ -4,7 +4,7 @@ CUDA_ARCH = sm_120
 NVCC_FLAGS = -std=c++17 -arch=$(CUDA_ARCH)
 PTX_FLAGS = $(NVCC_FLAGS) --relocatable-device-code=true
 
-all: gemm_test_modify gemm_test_original wrapper_kernel.ptx policy_greedy.ptx policy_maxsteals.ptx
+all: gemm_test_modify gemm_test_original wrapper_kernel.ptx policy_greedy.ptx policy_maxsteals.ptx policy_nosteal.ptx
 
 # Main executable - CLC scheduler version with policy framework
 # Compile with --keep-device-functions to preserve device functions in PTX
@@ -28,6 +28,9 @@ policy_greedy.ptx: policy_greedy.cu
 policy_maxsteals.ptx: policy_maxsteals.cu
 	$(NVCC) $(PTX_FLAGS) -ptx $< -o $@
 
+policy_nosteal.ptx: policy_nosteal.cu
+	$(NVCC) $(PTX_FLAGS) -ptx $< -o $@
+
 # Legacy policy (for backward compatibility)
 policy.ptx: policy.cu
 	$(NVCC) $(PTX_FLAGS) -ptx $< -o $@
@@ -40,7 +43,7 @@ clean:
 	rm -f gemm_test gemm_test_modify gemm_test_original wrapper_kernel *.ptx *.cubin *.o
 
 clean-all: clean
-	rm -rf test_matrices benchmark_results.csv plots/
+	rm -rf test_matrices* benchmark_results.csv results_*.csv plots* *.csv
 
 # Run original version (no policy framework)
 run-original: gemm_test_original
@@ -55,6 +58,10 @@ run-greedy: all
 run-maxsteals: all
 	@echo "=== Running with MaxStealsPolicy ==="
 	WRAPPER_KERNEL_PATH=./wrapper_kernel.ptx POLICY_PTX_PATH=./policy_maxsteals.ptx ./gemm_test_modify
+
+run-nosteal: all
+	@echo "=== Running with NoStealPolicy ==="
+	WRAPPER_KERNEL_PATH=./wrapper_kernel.ptx POLICY_PTX_PATH=./policy_nosteal.ptx ./gemm_test_modify
 
 run-all: all
 	@echo ""
@@ -73,6 +80,10 @@ run-all: all
 	@$(MAKE) run-maxsteals
 	@echo ""
 	@echo "========================================="
+	@echo ""
+	@$(MAKE) run-nosteal
+	@echo ""
+	@echo "========================================="
 	@echo "Comparison Complete"
 	@echo "========================================="
 
@@ -81,11 +92,11 @@ run: run-greedy
 # Benchmarking targets
 matrices:
 	@echo "=== Generating Test Matrices ==="
-	python3 generate_matrices.py --sizes 512x512x512 256x256x256 --output-dir ./test_matrices
+	python3 generate_matrices.py --sizes 256x256x256 512x512x512 1024x1024x1024 2048x2048x2048 --output-dir ./test_matrices
 
 benchmark: all matrices
 	@echo "=== Running Comprehensive Benchmark ==="
-	python3 benchmark_driver.py --warmup 3 --runs 10
+	python3 benchmark_driver.py --warmup 3 --runs 3 --output benchmark_results.csv
 
 visualize:
 	@echo "=== Generating Visualizations ==="
@@ -99,6 +110,7 @@ benchmark-full: benchmark visualize
 	@echo "Full benchmark and visualization complete!"
 	@echo "View HTML report: ./plots/benchmark_report.html"
 	@echo "========================================="
+
 
 help:
 	@echo "========================================="
@@ -116,27 +128,33 @@ help:
 	@echo "  make run-original  - Run original version (no policy)"
 	@echo "  make run-greedy    - Run with GreedyPolicy"
 	@echo "  make run-maxsteals - Run with MaxStealsPolicy"
+	@echo "  make run-nosteal   - Run with NoStealPolicy"
 	@echo "  make run-all       - Compare original vs all policies"
 	@echo ""
 	@echo "BENCHMARK TARGETS:"
-	@echo "  make matrices      - Generate test matrices with different patterns"
-	@echo "  make benchmark     - Run comprehensive benchmark suite"
-	@echo "  make visualize     - Generate visualizations from results"
-	@echo "  make benchmark-full - Run benchmark + generate visualizations"
+	@echo "  make matrices        - Generate test matrices (256, 512, 1024, 2048)"
+	@echo "  make benchmark       - Run comprehensive benchmark suite"
+	@echo "  make visualize       - Generate visualizations from results"
+	@echo "  make benchmark-full  - Run full benchmark + generate visualizations"
 	@echo ""
 	@echo "========================================="
 	@echo "AVAILABLE POLICIES:"
 	@echo "========================================="
 	@echo ""
 	@echo "1. GreedyPolicy (policy_greedy.ptx)"
-	@echo "   - Always executes (baseline CLC behavior)"
+	@echo "   - Always tries to steal work (max CLC behavior)"
 	@echo "   - No throttling or limiting"
-	@echo "   - Best for uniform workloads"
+	@echo "   - Best for imbalanced workloads"
 	@echo ""
 	@echo "2. MaxStealsPolicy (policy_maxsteals.ptx)"
 	@echo "   - Stops after 8 executions per block"
 	@echo "   - Useful for load balancing"
 	@echo "   - Prevents excessive work stealing"
+	@echo ""
+	@echo "3. NoStealPolicy (policy_nosteal.ptx)"
+	@echo "   - Never attempts to steal work"
+	@echo "   - Executes only initial assigned block"
+	@echo "   - Baseline to measure CLC framework overhead"
 	@echo ""
 	@echo "========================================="
 	@echo "MANUAL USAGE:"

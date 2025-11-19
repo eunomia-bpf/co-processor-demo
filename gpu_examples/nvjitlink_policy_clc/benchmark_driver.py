@@ -121,7 +121,7 @@ class BenchmarkRunner:
         print(f"Matrix directory: {self.matrix_dir}")
         print(f"Warmup runs: {self.warmup}")
         print(f"Benchmark runs: {self.runs}")
-        print(f"Total tests: {len(tests)} matrices x {len(policies) + 1} configs")
+        print(f"Total tests: {len(tests)} matrices x {1 + len(policies)} configs ({1} original + {len(policies)} policies)")
         print("=" * 80)
 
         for idx, test in enumerate(tests):
@@ -255,6 +255,7 @@ def main():
     policies = {
         'greedy': './policy_greedy.ptx',
         'maxsteals': './policy_maxsteals.ptx',
+        'nosteal': './policy_nosteal.ptx',
     }
 
     # Check policy files exist
