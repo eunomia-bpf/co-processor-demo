@@ -1,11 +1,11 @@
 // policy_greedy.cu
-// CLC GreedyPolicy - Always execute (baseline, no throttling)
+// CLC GreedyPolicy - Always try to steal work (maximum throughput)
 
 #include <cuda_runtime.h>
 
 // ============================================================================
 // CLC Policy: GreedyPolicy
-// Always execute (baseline - mimics default behavior)
+// Always try to steal work - mimics default CLC behavior
 // ============================================================================
 
 struct GreedyPolicy_State {
@@ -16,8 +16,8 @@ extern "C" __device__ void Policy_init(void* state_ptr) {
     // No state to initialize
 }
 
-extern "C" __device__ bool Policy_should_try(void* state_ptr, int current_block) {
-    return true;  // Always execute
+extern "C" __device__ bool Policy_should_try_steal(void* state_ptr, int current_block) {
+    return true;  // Always try to steal more work
 }
 
 // Function pointer types
@@ -26,4 +26,4 @@ typedef bool (*policy_decision_func_t)(void*, int);
 
 // Policy function pointers
 extern "C" __device__ policy_init_func_t d_Policy_init = Policy_init;
-extern "C" __device__ policy_decision_func_t d_Policy_should_try = Policy_should_try;
+extern "C" __device__ policy_decision_func_t d_Policy_should_try_steal = Policy_should_try_steal;

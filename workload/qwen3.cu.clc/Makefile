@@ -40,9 +40,12 @@ policy_greedy.ptx: policy_greedy.cu
 policy_maxsteals.ptx: policy_maxsteals.cu
 	$(NVCC) $(PTX_FLAGS) -ptx policy_maxsteals.cu -o policy_maxsteals.ptx
 
+policy_nosteal.ptx: policy_nosteal.cu
+	$(NVCC) $(PTX_FLAGS) -ptx policy_nosteal.cu -o policy_nosteal.ptx
+
 # Build all policy components
 .PHONY: policy-all
-policy-all: runcu_policy wrapper_kernel.ptx policy_greedy.ptx policy_maxsteals.ptx
+policy-all: runcu_policy wrapper_kernel.ptx policy_greedy.ptx policy_maxsteals.ptx policy_nosteal.ptx
 
 # download the model
 .PHONY: download-model
@@ -108,6 +111,11 @@ run-maxsteals: policy-all
 	@echo "=== Running with MaxStealsPolicy ==="
 	WRAPPER_KERNEL_PATH=./wrapper_kernel.ptx POLICY_PTX_PATH=./policy_maxsteals.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0
 
+.PHONY: run-nosteal
+run-nosteal: policy-all
+	@echo "=== Running with NoStealPolicy ==="
+	WRAPPER_KERNEL_PATH=./wrapper_kernel.ptx POLICY_PTX_PATH=./policy_nosteal.ptx ./runcu_policy Qwen3-0.6B-FP32.gguf -q "What is CUDA?" -r 0
+
 .PHONY: run-all
 run-all: runcu policy-all
 	@echo ""
@@ -126,6 +134,10 @@ run-all: runcu policy-all
 	@$(MAKE) run-maxsteals
 	@echo ""
 	@echo "========================================="
+	@echo ""
+	@$(MAKE) run-nosteal
+	@echo ""
+	@echo "========================================="
 	@echo "Comparison Complete"
 	@echo "========================================="
 
@@ -142,9 +154,10 @@ help-policy:
 	@echo "  make clean-all     - Clean build artifacts + PTX files"
 	@echo ""
 	@echo "RUN TARGETS:"
-	@echo "  make run-greedy    - Run with GreedyPolicy (default)"
+	@echo "  make run-greedy    - Run with GreedyPolicy"
 	@echo "  make run-original  - Run original version (no policy)"
 	@echo "  make run-maxsteals - Run with MaxStealsPolicy"
+	@echo "  make run-nosteal   - Run with NoStealPolicy"
 	@echo "  make run-all       - Compare original vs all policies"
 	@echo ""
 	@echo "========================================="
@@ -152,14 +165,19 @@ help-policy:
 	@echo "========================================="
 	@echo ""
 	@echo "1. GreedyPolicy (policy_greedy.ptx)"
-	@echo "   - Always executes (baseline CLC behavior)"
-	@echo "   - No throttling or limiting"
-	@echo "   - Best for uniform workloads"
+	@echo "   - Always tries to steal more work"
+	@echo "   - Maximum throughput via work-stealing"
+	@echo "   - Best for imbalanced workloads"
 	@echo ""
 	@echo "2. MaxStealsPolicy (policy_maxsteals.ptx)"
-	@echo "   - Stops after 8 executions per block"
+	@echo "   - Stops after 8 steal attempts"
 	@echo "   - Useful for load balancing"
 	@echo "   - Prevents excessive work stealing"
+	@echo ""
+	@echo "3. NoStealPolicy (policy_nosteal.ptx)"
+	@echo "   - Execute assigned work once, never steal"
+	@echo "   - Mimics traditional CUDA behavior"
+	@echo "   - Lowest overhead, no stealing benefits"
 	@echo ""
 	@echo "========================================="
 	@echo "MANUAL USAGE:"
