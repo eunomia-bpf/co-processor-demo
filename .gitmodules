@@ -8,3 +8,6 @@
 [submodule "scheduler/xsched"]
 	path = scheduler/xsched
 	url = https://github.com/XpuOS/xsched
+[submodule "gpu_ext_policy"]
+	path = gpu_ext_policy
+	url = https://github.com/eunomia-bpf/gpu_ext_policy
