@@ -1,0 +1,25 @@
+# Compiled binaries
+cublas_demo
+
+# PTX files
+*.ptx
+
+# Object files
+*.o
+*.obj
+
+# CUDA compilation files
+*.cubin
+*.fatbin
+*.i
+*.ii
+
+# Profiling files
+*.nvprof
+*.qdrep
+*.nvvp
+
+# Build artifacts
+*.exe
+*.out
+*.app
